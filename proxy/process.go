@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -150,6 +151,35 @@ func applySigmoidToRerankResponse(resp *http.Response) error {
 		return err
 	}
 
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if strings.Contains(encoding, "gzip") {
+		decoded, err := readGzipBody(bodyBytes)
+		if err != nil {
+			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			resp.ContentLength = int64(len(bodyBytes))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+			return nil
+		}
+		updated, ok, err := sigmoidRerankScores(decoded)
+		if err != nil || !ok {
+			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			resp.ContentLength = int64(len(bodyBytes))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+			return nil
+		}
+		encoded, err := writeGzipBody(updated)
+		if err != nil {
+			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			resp.ContentLength = int64(len(bodyBytes))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+			return nil
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(encoded))
+		resp.ContentLength = int64(len(encoded))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(encoded)))
+		return nil
+	}
+
 	updated, ok, err := sigmoidRerankScores(bodyBytes)
 	if err != nil || !ok {
 		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -164,29 +194,62 @@ func applySigmoidToRerankResponse(resp *http.Response) error {
 	return nil
 }
 
+func readGzipBody(body []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+func writeGzipBody(body []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := gzip.NewWriter(&buf)
+	if _, err := writer.Write(body); err != nil {
+		writer.Close()
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func sigmoidRerankScores(body []byte) ([]byte, bool, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, false, err
 	}
 
-	data, ok := payload["data"].([]any)
-	if !ok {
-		return nil, false, nil
-	}
-
 	updatedAny := false
-	for _, entry := range data {
-		entryMap, ok := entry.(map[string]any)
-		if !ok {
-			continue
+	if data, ok := payload["data"].([]any); ok {
+		for _, entry := range data {
+			entryMap, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			score, ok := entryMap["score"].(float64)
+			if !ok {
+				continue
+			}
+			entryMap["score"] = 1 / (1 + math.Exp(-score))
+			updatedAny = true
 		}
-		score, ok := entryMap["score"].(float64)
-		if !ok {
-			continue
+	}
+	if results, ok := payload["results"].([]any); ok {
+		for _, entry := range results {
+			entryMap, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			score, ok := entryMap["relevance_score"].(float64)
+			if !ok {
+				continue
+			}
+			entryMap["relevance_score"] = 1 / (1 + math.Exp(-score))
+			updatedAny = true
 		}
-		entryMap["score"] = 1 / (1 + math.Exp(-score))
-		updatedAny = true
 	}
 
 	if !updatedAny {
