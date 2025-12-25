@@ -1,16 +1,21 @@
 package proxy
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -101,6 +106,12 @@ func NewProcess(ID string, healthCheckTimeout int, config config.ModelConfig, pr
 			if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 				resp.Header.Set("X-Accel-Buffering", "no")
 			}
+			if resp.Request != nil {
+				applySigmoid, _ := resp.Request.Context().Value(proxyCtxKey("rerankSigmoidScores")).(bool)
+				if applySigmoid {
+					return applySigmoidToRerankResponse(resp)
+				}
+			}
 			return nil
 		}
 	}
@@ -125,6 +136,132 @@ func NewProcess(ID string, healthCheckTimeout int, config config.ModelConfig, pr
 		gracefulStopTimeout: 10 * time.Second,
 		cmdWaitChan:         make(chan struct{}),
 	}
+}
+
+func applySigmoidToRerankResponse(resp *http.Response) error {
+	if resp.Body == nil {
+		return nil
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if err := resp.Body.Close(); err != nil {
+		return err
+	}
+
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if strings.Contains(encoding, "gzip") {
+		decoded, err := readGzipBody(bodyBytes)
+		if err != nil {
+			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			resp.ContentLength = int64(len(bodyBytes))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+			return nil
+		}
+		updated, ok, err := sigmoidRerankScores(decoded)
+		if err != nil || !ok {
+			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			resp.ContentLength = int64(len(bodyBytes))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+			return nil
+		}
+		encoded, err := writeGzipBody(updated)
+		if err != nil {
+			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			resp.ContentLength = int64(len(bodyBytes))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+			return nil
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(encoded))
+		resp.ContentLength = int64(len(encoded))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(encoded)))
+		return nil
+	}
+
+	updated, ok, err := sigmoidRerankScores(bodyBytes)
+	if err != nil || !ok {
+		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		resp.ContentLength = int64(len(bodyBytes))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+		return nil
+	}
+
+	resp.Body = io.NopCloser(bytes.NewReader(updated))
+	resp.ContentLength = int64(len(updated))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(updated)))
+	return nil
+}
+
+func readGzipBody(body []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+func writeGzipBody(body []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := gzip.NewWriter(&buf)
+	if _, err := writer.Write(body); err != nil {
+		writer.Close()
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func sigmoidRerankScores(body []byte) ([]byte, bool, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, false, err
+	}
+
+	updatedAny := false
+	if data, ok := payload["data"].([]any); ok {
+		for _, entry := range data {
+			entryMap, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			score, ok := entryMap["score"].(float64)
+			if !ok {
+				continue
+			}
+			entryMap["score"] = 1 / (1 + math.Exp(-score))
+			updatedAny = true
+		}
+	}
+	if results, ok := payload["results"].([]any); ok {
+		for _, entry := range results {
+			entryMap, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			score, ok := entryMap["relevance_score"].(float64)
+			if !ok {
+				continue
+			}
+			entryMap["relevance_score"] = 1 / (1 + math.Exp(-score))
+			updatedAny = true
+		}
+	}
+
+	if !updatedAny {
+		return nil, false, nil
+	}
+
+	updated, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return updated, true, nil
 }
 
 // LogMonitor returns the log monitor associated with the process.
