@@ -170,34 +170,23 @@ func sigmoidRerankScores(body []byte) ([]byte, bool, error) {
 		return nil, false, err
 	}
 
-	updatedAny := false
-	if data, ok := payload["data"].([]any); ok {
-		for _, entry := range data {
-			entryMap, ok := entry.(map[string]any)
-			if !ok {
-				continue
-			}
-			score, ok := entryMap["score"].(float64)
-			if !ok {
-				continue
-			}
-			entryMap["score"] = 1 / (1 + math.Exp(-score))
-			updatedAny = true
-		}
+	data, ok := payload["data"].([]any)
+	if !ok {
+		return nil, false, nil
 	}
-	if results, ok := payload["results"].([]any); ok {
-		for _, entry := range results {
-			entryMap, ok := entry.(map[string]any)
-			if !ok {
-				continue
-			}
-			score, ok := entryMap["relevance_score"].(float64)
-			if !ok {
-				continue
-			}
-			entryMap["relevance_score"] = 1 / (1 + math.Exp(-score))
-			updatedAny = true
+
+	updatedAny := false
+	for _, entry := range data {
+		entryMap, ok := entry.(map[string]any)
+		if !ok {
+			continue
 		}
+		score, ok := entryMap["score"].(float64)
+		if !ok {
+			continue
+		}
+		entryMap["score"] = 1 / (1 + math.Exp(-score))
+		updatedAny = true
 	}
 
 	if !updatedAny {
