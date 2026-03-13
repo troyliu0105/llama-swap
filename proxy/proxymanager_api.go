@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -13,11 +14,13 @@ import (
 )
 
 type Model struct {
-	Id          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	State       string `json:"state"`
-	Unlisted    bool   `json:"unlisted"`
+	Id          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	State       string   `json:"state"`
+	Unlisted    bool     `json:"unlisted"`
+	PeerID      string   `json:"peerID"`
+	Aliases     []string `json:"aliases,omitempty"`
 }
 
 func addApiHandlers(pm *ProxyManager) {
@@ -30,6 +33,7 @@ func addApiHandlers(pm *ProxyManager) {
 		apiGroup.GET("/events", pm.apiSendEvents)
 		apiGroup.GET("/metrics", pm.apiGetMetrics)
 		apiGroup.GET("/version", pm.apiGetVersion)
+		apiGroup.GET("/captures/:id", pm.apiGetCapture)
 	}
 }
 
@@ -80,7 +84,20 @@ func (pm *ProxyManager) getModelStatus() []Model {
 			Description: pm.config.Models[modelID].Description,
 			State:       state,
 			Unlisted:    pm.config.Models[modelID].Unlisted,
+			Aliases:     pm.config.Models[modelID].Aliases,
 		})
+	}
+
+	// Iterate over the peer models
+	if pm.peerProxy != nil {
+		for peerID, peer := range pm.peerProxy.ListPeers() {
+			for _, modelID := range peer.Models {
+				models = append(models, Model{
+					Id:     modelID,
+					PeerID: peerID,
+				})
+			}
+		}
 	}
 
 	return models
@@ -92,6 +109,7 @@ const (
 	msgTypeModelStatus messageType = "modelStatus"
 	msgTypeLogData     messageType = "logData"
 	msgTypeMetrics     messageType = "metrics"
+	msgTypeInFlight    messageType = "inflight"
 )
 
 type messageEnvelope struct {
@@ -151,6 +169,18 @@ func (pm *ProxyManager) apiSendEvents(c *gin.Context) {
 		}
 	}
 
+	sendInFlight := func(total int) {
+		jsonData, err := json.Marshal(gin.H{"total": total})
+		if err == nil {
+			select {
+			case sendBuffer <- messageEnvelope{Type: msgTypeInFlight, Data: string(jsonData)}:
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+	}
+
 	/**
 	 * Send updated models list
 	 */
@@ -178,11 +208,19 @@ func (pm *ProxyManager) apiSendEvents(c *gin.Context) {
 		sendMetrics([]TokenMetrics{e.Metrics})
 	})()
 
+	/**
+	 * Send in-flight request stats related to token stats "Waiting: N" count.
+	 */
+	defer event.On(func(e InFlightRequestsEvent) {
+		sendInFlight(e.Total)
+	})()
+
 	// send initial batch of data
 	sendLogData("proxy", pm.proxyLogger.GetHistory())
 	sendLogData("upstream", pm.upstreamLogger.GetHistory())
 	sendModels()
 	sendMetrics(pm.metricsMonitor.getMetrics())
+	sendInFlight(pm.inFlightCounter.Current())
 
 	for {
 		select {
@@ -236,4 +274,21 @@ func (pm *ProxyManager) apiGetVersion(c *gin.Context) {
 		"commit":     pm.commit,
 		"build_date": pm.buildDate,
 	})
+}
+
+func (pm *ProxyManager) apiGetCapture(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid capture ID"})
+		return
+	}
+
+	capture := pm.metricsMonitor.getCaptureByID(id)
+	if capture == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "capture not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, capture)
 }
