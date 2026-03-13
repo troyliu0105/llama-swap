@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -190,7 +191,6 @@ filters:
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Check stripParams
 	stripParams := config.Filters.SanitizedStripParams()
 	if len(stripParams) != 2 {
 		t.Errorf("expected 2 strip params, got %d", len(stripParams))
@@ -199,11 +199,138 @@ filters:
 		t.Errorf("unexpected strip params: %v", stripParams)
 	}
 
-	// Check setParams
 	if config.Filters.SetParams == nil {
 		t.Fatal("Filters.SetParams should not be nil")
 	}
 	if config.Filters.SetParams["max_tokens"] != 1000 {
 		t.Errorf("expected max_tokens 1000, got %v", config.Filters.SetParams["max_tokens"])
+	}
+}
+
+func TestPeerConfig_WithNewFields(t *testing.T) {
+	yamlData := `
+proxy: http://192.168.1.23:8080
+models:
+  - model_a
+headers:
+  X-Custom-Header: custom-value
+  X-Empty-Header: ""
+maxConcurrent: 5
+queueSize: 64
+queueTimeout: 30s
+`
+	var config PeerConfig
+	err := yaml.Unmarshal([]byte(yamlData), &config)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(config.Headers) != 2 {
+		t.Errorf("expected 2 headers, got %d", len(config.Headers))
+	}
+	if config.Headers["X-Custom-Header"] != "custom-value" {
+		t.Errorf("expected X-Custom-Header=custom-value, got %s", config.Headers["X-Custom-Header"])
+	}
+	if config.Headers["X-Empty-Header"] != "" {
+		t.Errorf("expected X-Empty-Header empty, got %s", config.Headers["X-Empty-Header"])
+	}
+	if config.MaxConcurrent != 5 {
+		t.Errorf("expected MaxConcurrent=5, got %d", config.MaxConcurrent)
+	}
+	if config.QueueSize != 64 {
+		t.Errorf("expected QueueSize=64, got %d", config.QueueSize)
+	}
+	if config.QueueTimeout != 30*time.Second {
+		t.Errorf("expected QueueTimeout=30s, got %v", config.QueueTimeout)
+	}
+}
+
+func TestPeerConfig_DefaultsForNewFields(t *testing.T) {
+	yamlData := `
+proxy: http://192.168.1.23:8080
+models:
+  - model_a
+`
+	var config PeerConfig
+	err := yaml.Unmarshal([]byte(yamlData), &config)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(config.Headers) != 0 {
+		t.Errorf("expected empty headers, got %d", len(config.Headers))
+	}
+	if config.MaxConcurrent != 0 {
+		t.Errorf("expected MaxConcurrent=0 (unlimited), got %d", config.MaxConcurrent)
+	}
+	if config.QueueSize != 32 {
+		t.Errorf("expected QueueSize=32 (default), got %d", config.QueueSize)
+	}
+	if config.QueueTimeout != 60*time.Second {
+		t.Errorf("expected QueueTimeout=60s (default), got %v", config.QueueTimeout)
+	}
+}
+
+func TestPeerConfig_WithNewFields(t *testing.T) {
+	yamlData := `
+proxy: http://192.168.1.23:8080
+models:
+  - model_a
+headers:
+  X-Custom-Header: custom-value
+  X-Empty-Header: ""
+maxConcurrent: 5
+queueSize: 64
+queueTimeout: 30s
+`
+	var config PeerConfig
+	err := yaml.Unmarshal([]byte(yamlData), &config)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(config.Headers) != 2 {
+		t.Errorf("expected 2 headers, got %d", len(config.Headers))
+	}
+	if config.Headers["X-Custom-Header"] != "custom-value" {
+		t.Errorf("expected X-Custom-Header=custom-value, got %s", config.Headers["X-Custom-Header"])
+	}
+	if config.Headers["X-Empty-Header"] != "" {
+		t.Errorf("expected X-Empty-Header empty, got %s", config.Headers["X-Empty-Header"])
+	}
+	if config.MaxConcurrent != 5 {
+		t.Errorf("expected MaxConcurrent=5, got %d", config.MaxConcurrent)
+	}
+	if config.QueueSize != 64 {
+		t.Errorf("expected QueueSize=64, got %d", config.QueueSize)
+	}
+	if config.QueueTimeout != 30*time.Second {
+		t.Errorf("expected QueueTimeout=30s, got %v", config.QueueTimeout)
+	}
+}
+
+func TestPeerConfig_DefaultsForNewFields(t *testing.T) {
+	yamlData := `
+proxy: http://192.168.1.23:8080
+models:
+  - model_a
+`
+	var config PeerConfig
+	err := yaml.Unmarshal([]byte(yamlData), &config)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(config.Headers) != 0 {
+		t.Errorf("expected empty headers, got %d", len(config.Headers))
+	}
+	if config.MaxConcurrent != 0 {
+		t.Errorf("expected MaxConcurrent=0 (unlimited), got %d", config.MaxConcurrent)
+	}
+	if config.QueueSize != 32 {
+		t.Errorf("expected QueueSize=32 (default), got %d", config.QueueSize)
+	}
+	if config.QueueTimeout != 60*time.Second {
+		t.Errorf("expected QueueTimeout=60s (default), got %v", config.QueueTimeout)
 	}
 }
