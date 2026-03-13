@@ -263,6 +263,109 @@ func TestProxyRequest_SSEHeaderModification(t *testing.T) {
 
 	err = pm.ProxyRequest("test-model", w, req)
 	assert.NoError(t, err)
-	// The X-Accel-Buffering header should be set to "no" for SSE
 	assert.Equal(t, "no", w.Header().Get("X-Accel-Buffering"))
+}
+
+func TestProxyRequest_HeaderOverride(t *testing.T) {
+	var receivedHeaders http.Header
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			Models:   []string{"test-model"},
+			Headers: map[string]string{
+				"X-Custom-Header": "custom-value",
+				"X-Override-Me":   "overridden",
+			},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("X-Override-Me", "original")
+	req.Header.Set("X-Existing", "exists")
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	assert.NoError(t, err)
+	assert.Equal(t, "custom-value", receivedHeaders.Get("X-Custom-Header"))
+	assert.Equal(t, "overridden", receivedHeaders.Get("X-Override-Me"))
+	assert.Equal(t, "exists", receivedHeaders.Get("X-Existing"))
+}
+
+func TestProxyRequest_HeaderDelete(t *testing.T) {
+	var receivedHeaders http.Header
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			Models:   []string{"test-model"},
+			Headers: map[string]string{
+				"X-Delete-Me": "",
+			},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("X-Delete-Me", "should-be-deleted")
+	req.Header.Set("X-Keep-Me", "kept")
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	assert.NoError(t, err)
+	assert.Empty(t, receivedHeaders.Get("X-Delete-Me"))
+	assert.Equal(t, "kept", receivedHeaders.Get("X-Keep-Me"))
+}
+
+func TestProxyRequest_HeaderOverrideAfterApiKey(t *testing.T) {
+	var receivedHeaders http.Header
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			ApiKey:   "api-key-value",
+			Models:   []string{"test-model"},
+			Headers: map[string]string{
+				"Authorization": "Custom-Auth",
+				"x-api-key":     "",
+			},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	assert.NoError(t, err)
+	assert.Equal(t, "Custom-Auth", receivedHeaders.Get("Authorization"))
+	assert.Empty(t, receivedHeaders.Get("x-api-key"))
 }
