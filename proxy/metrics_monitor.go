@@ -175,6 +175,7 @@ func (mp *metricsMonitor) wrapHandler(
 	request *http.Request,
 	next func(modelID string, w http.ResponseWriter, r *http.Request) error,
 ) error {
+	requestStart := time.Now()
 	// Capture request body and headers if captures enabled
 	var reqBody []byte
 	var reqHeaders map[string]string
@@ -220,7 +221,7 @@ func (mp *metricsMonitor) wrapHandler(
 	tm := TokenMetrics{
 		Timestamp:  time.Now(),
 		Model:      modelID,
-		DurationMs: int(time.Since(recorder.StartTime()).Milliseconds()),
+		DurationMs: int(time.Since(requestStart).Milliseconds()),
 	}
 
 	body := recorder.body.Bytes()
@@ -241,7 +242,7 @@ func (mp *metricsMonitor) wrapHandler(
 		}
 	}
 	if strings.Contains(recorder.Header().Get("Content-Type"), "text/event-stream") {
-		if parsed, err := processStreamingResponse(modelID, recorder.StartTime(), body); err != nil {
+		if parsed, err := processStreamingResponse(modelID, requestStart, body); err != nil {
 			mp.logger.Warnf("error processing streaming response: %v, path=%s, recording minimal metrics", err, request.URL.Path)
 		} else {
 			tm = parsed
@@ -261,7 +262,7 @@ func (mp *metricsMonitor) wrapHandler(
 			}
 
 			if usage.Exists() || timings.Exists() {
-				if parsedMetrics, err := parseMetrics(modelID, recorder.StartTime(), usage, timings); err != nil {
+				if parsedMetrics, err := parseMetrics(modelID, requestStart, usage, timings); err != nil {
 					mp.logger.Warnf("error parsing metrics: %v, path=%s, recording minimal metrics", err, request.URL.Path)
 				} else {
 					tm = parsedMetrics
@@ -386,8 +387,13 @@ func parseMetrics(modelID string, start time.Time, usage, timings gjson.Result) 
 			outputTokens = int(ot.Int())
 		}
 
+		// support multiple cached tokens formats
 		if ct := usage.Get("cache_read_input_tokens"); ct.Exists() {
 			cachedTokens = int(ct.Int())
+		} else if ptd := usage.Get("prompt_tokens_details"); ptd.Exists() {
+			if ct := ptd.Get("cached_tokens"); ct.Exists() {
+				cachedTokens = int(ct.Int())
+			}
 		}
 	}
 
@@ -401,6 +407,19 @@ func parseMetrics(modelID string, start time.Time, usage, timings gjson.Result) 
 
 		if cachedValue := timings.Get("cache_n"); cachedValue.Exists() {
 			cachedTokens = int(cachedValue.Int())
+		}
+	} else if durationMs > 0 {
+		// fallback: estimate speed from token counts when timings unavailable
+		effectiveInputTokens := inputTokens
+		if cachedTokens > 0 {
+			effectiveInputTokens = inputTokens - cachedTokens
+		}
+
+		if outputTokens > 0 {
+			tokensPerSecond = float64(outputTokens) / (float64(durationMs) / 1000.0)
+		}
+		if effectiveInputTokens > 0 {
+			promptPerSecond = float64(effectiveInputTokens) / (float64(durationMs) / 1000.0)
 		}
 	}
 

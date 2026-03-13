@@ -642,6 +642,114 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 		assert.Equal(t, 1, len(metrics))
 		assert.Equal(t, -1, metrics[0].CachedTokens) // Default value when not present
 	})
+
+	t.Run("parses prompt_tokens_details.cached_tokens format", func(t *testing.T) {
+		mm := newMetricsMonitor(testLogger, 10, 0)
+
+		responseBody := `{
+			"usage": {
+				"prompt_tokens": 100,
+				"completion_tokens": 50,
+				"prompt_tokens_details": {
+					"cached_tokens": 30
+				}
+			}
+		}`
+
+		nextHandler := func(modelID string, w http.ResponseWriter, r *http.Request) error {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(responseBody))
+			return nil
+		}
+
+		req := httptest.NewRequest("POST", "/test", nil)
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, nextHandler)
+		assert.NoError(t, err)
+
+		metrics := mm.getMetrics()
+		assert.Equal(t, 1, len(metrics))
+		assert.Equal(t, 30, metrics[0].CachedTokens)
+		assert.Equal(t, 100, metrics[0].InputTokens)
+		assert.Equal(t, 50, metrics[0].OutputTokens)
+	})
+
+	t.Run("calculates fallback speed without timings", func(t *testing.T) {
+		mm := newMetricsMonitor(testLogger, 10, 0)
+
+		// 100 prompt tokens, 50 completion tokens, 1000ms duration
+		// expected: tokens_per_second = 50 / 1.0 = 50.0
+		//           prompt_per_second = 100 / 1.0 = 100.0
+		responseBody := `{
+			"usage": {
+				"prompt_tokens": 100,
+				"completion_tokens": 50
+			}
+		}`
+
+		nextHandler := func(modelID string, w http.ResponseWriter, r *http.Request) error {
+			time.Sleep(1000 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(responseBody))
+			return nil
+		}
+
+		req := httptest.NewRequest("POST", "/test", nil)
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, nextHandler)
+		assert.NoError(t, err)
+
+		metrics := mm.getMetrics()
+		assert.Equal(t, 1, len(metrics))
+		assert.Greater(t, metrics[0].TokensPerSecond, 0.0)
+		assert.Greater(t, metrics[0].PromptPerSecond, 0.0)
+		assert.GreaterOrEqual(t, metrics[0].DurationMs, 1000)
+	})
+
+	t.Run("fallback speed excludes cached tokens from prompt calculation", func(t *testing.T) {
+		mm := newMetricsMonitor(testLogger, 10, 0)
+
+		// 100 prompt tokens, 30 cached, 50 completion tokens, 1000ms duration
+		// expected: prompt_per_second = (100 - 30) / 1.0 = 70.0
+		responseBody := `{
+			"usage": {
+				"prompt_tokens": 100,
+				"completion_tokens": 50,
+				"prompt_tokens_details": {
+					"cached_tokens": 30
+				}
+			}
+		}`
+
+		nextHandler := func(modelID string, w http.ResponseWriter, r *http.Request) error {
+			time.Sleep(1000 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(responseBody))
+			return nil
+		}
+
+		req := httptest.NewRequest("POST", "/test", nil)
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, nextHandler)
+		assert.NoError(t, err)
+
+		metrics := mm.getMetrics()
+		assert.Equal(t, 1, len(metrics))
+		assert.Equal(t, 30, metrics[0].CachedTokens)
+		assert.Equal(t, 100, metrics[0].InputTokens)
+		// prompt_per_second should be based on 70 tokens (100 - 30 cached)
+		// With ~1000ms duration, should be around 70 t/s
+		assert.Greater(t, metrics[0].PromptPerSecond, 0.0)
+	})
 }
 
 func TestMetricsMonitor_StreamingResponse(t *testing.T) {
