@@ -5,7 +5,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mostlygeek/llama-swap/proxy/config"
 	"github.com/stretchr/testify/assert"
@@ -368,4 +371,144 @@ func TestProxyRequest_HeaderOverrideAfterApiKey(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "Custom-Auth", receivedHeaders.Get("Authorization"))
 	assert.Empty(t, receivedHeaders.Get("x-api-key"))
+}
+
+func TestProxyRequest_ConcurrencyLimit(t *testing.T) {
+	var concurrentCount int32
+	var maxConcurrent int32
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := concurrentCount
+		for {
+			old := atomic.LoadInt32(&maxConcurrent)
+			if cur <= old || atomic.CompareAndSwapInt32(&maxConcurrent, old, cur) {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		atomic.AddInt32(&concurrentCount, -1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:         testServer.URL,
+			ProxyURL:      proxyURL,
+			Models:        []string{"test-model"},
+			MaxConcurrent: 2,
+			QueueSize:     10,
+			QueueTimeout:  5 * time.Second,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, testLogger)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			w := httptest.NewRecorder()
+			pm.ProxyRequest("test-model", w, req)
+		}()
+	}
+	wg.Wait()
+
+	assert.LessOrEqual(t, atomic.LoadInt32(&maxConcurrent), int32(2))
+}
+
+func TestProxyRequest_QueueFull(t *testing.T) {
+	blockChan := make(chan struct{})
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-blockChan
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:         testServer.URL,
+			ProxyURL:      proxyURL,
+			Models:        []string{"test-model"},
+			MaxConcurrent: 1,
+			QueueSize:     1,
+			QueueTimeout:  5 * time.Second,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, testLogger)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	results := make([]int, 3)
+	var mu sync.Mutex
+
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			w := httptest.NewRecorder()
+			pm.ProxyRequest("test-model", w, req)
+			mu.Lock()
+			results[idx] = w.Code
+			mu.Unlock()
+		}(i)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	close(blockChan)
+	wg.Wait()
+
+	successCount := 0
+	serviceUnavailableCount := 0
+	for _, code := range results {
+		if code == http.StatusOK {
+			successCount++
+		} else if code == http.StatusServiceUnavailable {
+			serviceUnavailableCount++
+		}
+	}
+
+	assert.Equal(t, 2, successCount)
+	assert.Equal(t, 1, serviceUnavailableCount)
+}
+
+func TestProxyRequest_NoConcurrencyLimit(t *testing.T) {
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(10 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:         testServer.URL,
+			ProxyURL:      proxyURL,
+			Models:        []string{"test-model"},
+			MaxConcurrent: 0,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, testLogger)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			w := httptest.NewRecorder()
+			err := pm.ProxyRequest("test-model", w, req)
+			assert.NoError(t, err)
+			assert.Equal(t, http.StatusOK, w.Code)
+		}()
+	}
+	wg.Wait()
 }
