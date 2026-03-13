@@ -451,7 +451,28 @@ peers:
       # - protected params like "model" cannot be overridden
       # - values can be strings, numbers, booleans, arrays, or objects
       setParams:
-        # Example: enforce zero-data-retention for OpenRouter
         provider:
           data_collection: "deny"
           zdr: true
+
+    # headers: override headers sent to this peer
+    # - optional, default: empty dictionary
+    # - non-empty string: set/override header value
+    # - empty string: delete header
+    headers:
+      X-Custom-Header: "custom-value"
+      X-Remove-Me: ""
+
+    # maxConcurrent: maximum concurrent requests to this peer
+    # - optional, default: 0 (unlimited)
+    # - when limit is reached, requests are queued
+    maxConcurrent: 5
+
+    # queueSize: number of requests to queue when maxConcurrent is reached
+    # - optional, default: 32
+    # - when queue is full, requests return 503 Service Unavailable
+    queueSize: 64
+
+    # queueTimeout: max time to wait in queue before returning 503
+    # - optional, default: 60s
+    queueTimeout: 30s

@@ -376,6 +376,31 @@
                         "additionalProperties": false,
                         "default": {},
                         "description": "Dictionary of filter settings for peer requests. Supports stripParams and setParams."
+                    },
+                    "headers": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "string"
+                        },
+                        "default": {},
+                        "description": "Dictionary of header overrides for peer requests. Non-empty string sets/overrides header. Empty string deletes header."
+                    },
+                    "maxConcurrent": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Maximum concurrent requests to this peer. 0 means unlimited. When limit is reached, requests are queued."
+                    },
+                    "queueSize": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 32,
+                        "description": "Number of requests to queue when maxConcurrent is reached. When queue is full, requests return 503 Service Unavailable."
+                    },
+                    "queueTimeout": {
+                        "type": "string",
+                        "default": "60s",
+                        "description": "Maximum time to wait in queue before returning 503 Service Unavailable. Duration format: number followed by unit (s, m, h)."
                     }
                 }
             },
