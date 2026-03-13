@@ -64,6 +64,11 @@ startPort: 10001
 # - see #366 for more details
 sendLoadingState: true
 
+# rerankSigmoidScores: apply sigmoid normalization to reranking scores
+# - optional, default: false
+# - when true, reranking endpoints return scores transformed by sigmoid
+rerankSigmoidScores: false
+
 # includeAliasesInList: present aliases within the /v1/models OpenAI API listing
 # - optional, default: false
 # - when true, model aliases will be output to the API model listing duplicating
@@ -231,6 +236,10 @@ models:
     # sendLoadingState: overrides the global sendLoadingState setting for this model
     # - optional, default: undefined (use global setting)
     sendLoadingState: false
+
+    # rerankSigmoidScores: overrides the global rerankSigmoidScores setting for this model
+    # - optional, default: undefined (use global setting)
+    rerankSigmoidScores: true
 
   # Unlisted model example:
   "qwen-unlisted":

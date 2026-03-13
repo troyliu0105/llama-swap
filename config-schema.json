@@ -97,6 +97,11 @@
             "default": false,
             "description": "Inject loading status updates into the reasoning field. When true, a stream of loading messages will be sent to the client."
         },
+        "rerankSigmoidScores": {
+            "type": "boolean",
+            "default": false,
+            "description": "Apply sigmoid normalization to scores returned by reranking endpoints."
+        },
         "includeAliasesInList": {
             "type": "boolean",
             "default": false,
@@ -209,6 +214,10 @@
                     "sendLoadingState": {
                         "type": "boolean",
                         "description": "Overrides the global sendLoadingState for this model. Ommitting this property will use the global setting."
+                    },
+                    "rerankSigmoidScores": {
+                        "type": "boolean",
+                        "description": "Overrides the global rerankSigmoidScores setting for this model. Omitting this property will use the global setting."
                     },
                     "unlisted": {
                         "type": "boolean",

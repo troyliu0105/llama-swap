@@ -1,7 +1,11 @@
 package proxy
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -60,6 +64,66 @@ func TestProcess_AutomaticallyStartsUpstream(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status code %d, got %d", http.StatusOK, w.Code)
 	}
+}
+
+func TestSigmoidRerankScores(t *testing.T) {
+	payload := map[string]any{
+		"results": []any{
+			map[string]any{"index": 0, "relevance_score": 5.0},
+			map[string]any{"index": 1, "relevance_score": -5.0},
+		},
+	}
+	body, err := json.Marshal(payload)
+	assert.NoError(t, err)
+
+	updated, ok, err := sigmoidRerankScores(body)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+
+	var decoded map[string]any
+	assert.NoError(t, json.Unmarshal(updated, &decoded))
+	results := decoded["results"].([]any)
+	first := results[0].(map[string]any)["relevance_score"].(float64)
+	second := results[1].(map[string]any)["relevance_score"].(float64)
+	assert.Greater(t, first, 0.99)
+	assert.Less(t, second, 0.01)
+}
+
+func TestApplySigmoidToRerankResponseGzip(t *testing.T) {
+	payload := map[string]any{
+		"results": []any{
+			map[string]any{"index": 0, "relevance_score": 5.0},
+		},
+	}
+	body, err := json.Marshal(payload)
+	assert.NoError(t, err)
+
+	var gzipped bytes.Buffer
+	writer := gzip.NewWriter(&gzipped)
+	_, err = writer.Write(body)
+	assert.NoError(t, err)
+	assert.NoError(t, writer.Close())
+
+	resp := &http.Response{
+		Header:        http.Header{},
+		Body:          io.NopCloser(bytes.NewReader(gzipped.Bytes())),
+		ContentLength: int64(gzipped.Len()),
+	}
+	resp.Header.Set("Content-Encoding", "gzip")
+
+	assert.NoError(t, applySigmoidToRerankResponse(resp))
+
+	reader, err := gzip.NewReader(resp.Body)
+	assert.NoError(t, err)
+	defer reader.Close()
+	updated, err := io.ReadAll(reader)
+	assert.NoError(t, err)
+
+	var decoded map[string]any
+	assert.NoError(t, json.Unmarshal(updated, &decoded))
+	results := decoded["results"].([]any)
+	first := results[0].(map[string]any)["relevance_score"].(float64)
+	assert.Greater(t, first, 0.99)
 }
 
 // TestProcess_WaitOnMultipleStarts tests that multiple concurrent requests

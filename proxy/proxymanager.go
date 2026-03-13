@@ -192,6 +192,15 @@ func New(proxyConfig config.Config) *ProxyManager {
 	return pm
 }
 
+func isRerankPath(path string) bool {
+	switch path {
+	case "/reranking", "/rerank", "/v1/rerank", "/v1/reranking":
+		return true
+	default:
+		return false
+	}
+}
+
 func (pm *ProxyManager) setupGinEngine() {
 
 	pm.ginEngine.Use(func(c *gin.Context) {
@@ -629,6 +638,11 @@ func (pm *ProxyManager) proxyInferenceHandler(c *gin.Context) {
 	isStreaming := gjson.GetBytes(bodyBytes, "stream").Bool()
 	ctx := context.WithValue(c.Request.Context(), proxyCtxKey("streaming"), isStreaming)
 	ctx = context.WithValue(ctx, proxyCtxKey("model"), realModelName)
+	if pm.config.Models[realModelName].RerankSigmoidScores != nil &&
+		*pm.config.Models[realModelName].RerankSigmoidScores &&
+		isRerankPath(c.Request.URL.Path) {
+		ctx = context.WithValue(ctx, proxyCtxKey("rerankSigmoidScores"), true)
+	}
 	c.Request = c.Request.WithContext(ctx)
 
 	if pm.metricsMonitor != nil && c.Request.Method == "POST" {

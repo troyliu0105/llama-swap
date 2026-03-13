@@ -141,6 +141,9 @@ type Config struct {
 	// send loading state in reasoning
 	SendLoadingState bool `yaml:"sendLoadingState"`
 
+	// apply sigmoid normalization to reranking scores
+	RerankSigmoidScores bool `yaml:"rerankSigmoidScores"`
+
 	// present aliases to /v1/models OpenAI API listing
 	IncludeAliasesInList bool `yaml:"includeAliasesInList"`
 
@@ -380,6 +383,10 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		if modelConfig.SendLoadingState == nil {
 			v := config.SendLoadingState // copy it
 			modelConfig.SendLoadingState = &v
+		}
+		if modelConfig.RerankSigmoidScores == nil {
+			v := config.RerankSigmoidScores
+			modelConfig.RerankSigmoidScores = &v
 		}
 
 		config.Models[modelId] = modelConfig

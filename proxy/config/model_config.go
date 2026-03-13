@@ -38,6 +38,9 @@ type ModelConfig struct {
 
 	// override global setting
 	SendLoadingState *bool `yaml:"sendLoadingState"`
+
+	// override global rerank sigmoid setting
+	RerankSigmoidScores *bool `yaml:"rerankSigmoidScores"`
 }
 
 func (m *ModelConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
