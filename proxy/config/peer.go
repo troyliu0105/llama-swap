@@ -17,6 +17,7 @@ type PeerConfig struct {
 	MaxConcurrent int               `yaml:"maxConcurrent"`
 	QueueSize     int               `yaml:"queueSize"`
 	QueueTimeout  time.Duration     `yaml:"queueTimeout"`
+	StripV1Prefix bool              `yaml:"stripV1Prefix"`
 }
 
 func (c *PeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {

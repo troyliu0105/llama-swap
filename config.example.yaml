@@ -476,3 +476,9 @@ peers:
     # queueTimeout: max time to wait in queue before returning 503
     # - optional, default: 60s
     queueTimeout: 30s
+
+    # stripV1Prefix: remove /v1 prefix from request path before forwarding
+    # - optional, default: false
+    # - useful for APIs that don't use /v1 prefix (e.g., some provider-specific endpoints)
+    # - example: /v1/chat/completions -> /chat/completions
+    stripV1Prefix: false

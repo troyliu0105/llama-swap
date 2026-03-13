@@ -14,10 +14,11 @@ import (
 )
 
 type peerProxyMember struct {
-	peerID       string
-	reverseProxy *httputil.ReverseProxy
-	apiKey       string
-	headers      map[string]string
+	peerID        string
+	reverseProxy  *httputil.ReverseProxy
+	apiKey        string
+	headers       map[string]string
+	stripV1Prefix bool
 
 	maxConcurrent int
 	queueSize     int
@@ -98,6 +99,7 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, proxyLogger *LogMonitor) (*
 			reverseProxy:  reverseProxy,
 			apiKey:        peer.ApiKey,
 			headers:       peer.Headers,
+			stripV1Prefix: peer.StripV1Prefix,
 			maxConcurrent: peer.MaxConcurrent,
 			queueSize:     peer.QueueSize,
 			queueTimeout:  peer.QueueTimeout,
@@ -209,6 +211,13 @@ func (p *PeerProxy) ProxyRequest(model_id string, writer http.ResponseWriter, re
 			request.Header.Del(key)
 		} else {
 			request.Header.Set(key, value)
+		}
+	}
+
+	if pp.stripV1Prefix {
+		request.URL.Path = strings.TrimPrefix(request.URL.Path, "/v1")
+		if request.URL.Path == "" {
+			request.URL.Path = "/"
 		}
 	}
 

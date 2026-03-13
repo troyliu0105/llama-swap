@@ -401,6 +401,11 @@
                         "type": "string",
                         "default": "60s",
                         "description": "Maximum time to wait in queue before returning 503 Service Unavailable. Duration format: number followed by unit (s, m, h)."
+                    },
+                    "stripV1Prefix": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Remove /v1 prefix from request path before forwarding to peer. Useful for APIs that don't use /v1 prefix."
                     }
                 }
             },

@@ -508,3 +508,61 @@ func TestProxyRequest_NoConcurrencyLimit(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestProxyRequest_StripV1Prefix(t *testing.T) {
+	var receivedPath string
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:         testServer.URL,
+			ProxyURL:      proxyURL,
+			Models:        []string{"test-model"},
+			StripV1Prefix: true,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	assert.NoError(t, err)
+	assert.Equal(t, "/chat/completions", receivedPath)
+}
+
+func TestProxyRequest_NoStripV1Prefix(t *testing.T) {
+	var receivedPath string
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:         testServer.URL,
+			ProxyURL:      proxyURL,
+			Models:        []string{"test-model"},
+			StripV1Prefix: false,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	assert.NoError(t, err)
+	assert.Equal(t, "/v1/chat/completions", receivedPath)
+}
