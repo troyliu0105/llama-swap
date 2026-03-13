@@ -17,6 +17,7 @@ type peerProxyMember struct {
 	peerID       string
 	reverseProxy *httputil.ReverseProxy
 	apiKey       string
+	headers      map[string]string
 }
 
 type PeerProxy struct {
@@ -83,6 +84,7 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, proxyLogger *LogMonitor) (*
 			peerID:       peerID,
 			reverseProxy: reverseProxy,
 			apiKey:       peer.ApiKey,
+			headers:      peer.Headers,
 		}
 
 		// Map each model to this peer's proxy
@@ -130,10 +132,17 @@ func (p *PeerProxy) ProxyRequest(model_id string, writer http.ResponseWriter, re
 		return fmt.Errorf("no peer proxy found for model %s", model_id)
 	}
 
-	// Inject API key if configured for this peer
 	if pp.apiKey != "" {
 		request.Header.Set("Authorization", "Bearer "+pp.apiKey)
 		request.Header.Set("x-api-key", pp.apiKey)
+	}
+
+	for key, value := range pp.headers {
+		if value == "" {
+			request.Header.Del(key)
+		} else {
+			request.Header.Set(key, value)
+		}
 	}
 
 	pp.reverseProxy.ServeHTTP(writer, request)
