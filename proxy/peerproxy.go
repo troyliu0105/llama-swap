@@ -169,10 +169,8 @@ func (pp *peerProxyMember) serveWithConcurrencyControl(writer http.ResponseWrite
 
 	select {
 	case pp.sem <- struct{}{}:
-		go func() {
-			defer func() { <-pp.sem }()
-			pp.reverseProxy.ServeHTTP(writer, request)
-		}()
+		pp.reverseProxy.ServeHTTP(writer, request)
+		<-pp.sem
 		return false
 	default:
 	}
