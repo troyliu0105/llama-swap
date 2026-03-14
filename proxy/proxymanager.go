@@ -173,7 +173,7 @@ func New(proxyConfig config.Config) *ProxyManager {
 		maxMetrics = proxyConfig.MetricsMaxInMemory
 	}
 
-	peerProxy, err := NewPeerProxy(proxyConfig.Peers, proxyLogger)
+	peerProxy, err := NewPeerProxy(proxyConfig.Peers, proxyConfig.PrefixPeerModels, proxyLogger)
 	if err != nil {
 		proxyLogger.Errorf("Disabling Peering. Failed to create proxy peers: %v", err)
 		peerProxy = nil
@@ -555,10 +555,16 @@ func (pm *ProxyManager) listModelsHandler(c *gin.Context) {
 
 	if pm.peerProxy != nil {
 		for peerID, peer := range pm.peerProxy.ListPeers() {
-			// add peer models
+			peerPrefix := pm.config.PrefixPeerModels
+			if peer.PrefixPeerModels != nil {
+				peerPrefix = *peer.PrefixPeerModels
+			}
 			for _, modelID := range peer.Models {
-				// Skip unlisted models if not showing them
-				record := newRecord(modelID, config.ModelConfig{
+				displayID := modelID
+				if peerPrefix {
+					displayID = peerID + "/" + modelID
+				}
+				record := newRecord(displayID, config.ModelConfig{
 					Name: fmt.Sprintf("%s: %s", peerID, modelID),
 					Metadata: map[string]any{
 						"peerID": peerID,

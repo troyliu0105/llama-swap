@@ -26,7 +26,15 @@ type peerProxyMember struct {
 	sem           chan struct{}
 	queue         chan *queuedRequest
 	logger        *LogMonitor
+	stopCh        chan struct{}
 }
+
+type serveResult int
+
+const (
+	serveHandled serveResult = iota
+	serveContinue
+)
 
 type queuedRequest struct {
 	writer  http.ResponseWriter
@@ -35,12 +43,15 @@ type queuedRequest struct {
 }
 
 type PeerProxy struct {
-	peers    config.PeerDictionaryConfig
-	proxyMap map[string]*peerProxyMember
+	peers            config.PeerDictionaryConfig
+	proxyMap         map[string]*peerProxyMember
+	prefixedModels   map[string]bool
+	prefixPeerModels bool
 }
 
-func NewPeerProxy(peers config.PeerDictionaryConfig, proxyLogger *LogMonitor) (*PeerProxy, error) {
+func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, proxyLogger *LogMonitor) (*PeerProxy, error) {
 	proxyMap := make(map[string]*peerProxyMember)
+	prefixedModels := make(map[string]bool)
 
 	// Sort peer IDs for consistent iteration order
 	peerIDs := make([]string, 0, len(peers))
@@ -109,22 +120,34 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, proxyLogger *LogMonitor) (*
 		if peer.MaxConcurrent > 0 {
 			pp.sem = make(chan struct{}, peer.MaxConcurrent)
 			pp.queue = make(chan *queuedRequest, peer.QueueSize)
+			pp.stopCh = make(chan struct{})
 			go pp.processQueue()
 		}
 
 		// Map each model to this peer's proxy
+		peerPrefix := prefixPeerModels
+		if peer.PrefixPeerModels != nil {
+			peerPrefix = *peer.PrefixPeerModels
+		}
 		for _, modelID := range peer.Models {
-			if _, found := proxyMap[modelID]; found {
-				proxyLogger.Warnf("peer %s: model %s already mapped to another peer, skipping", peerID, modelID)
+			lookupKey := modelID
+			if peerPrefix {
+				lookupKey = peerID + "/" + modelID
+			}
+			if _, found := proxyMap[lookupKey]; found {
+				proxyLogger.Warnf("peer %s: model %s already mapped to another peer, skipping", peerID, lookupKey)
 				continue
 			}
-			proxyMap[modelID] = pp
+			proxyMap[lookupKey] = pp
+			prefixedModels[lookupKey] = peerPrefix
 		}
 	}
 
 	return &PeerProxy{
-		peers:    peers,
-		proxyMap: proxyMap,
+		peers:            peers,
+		proxyMap:         proxyMap,
+		prefixedModels:   prefixedModels,
+		prefixPeerModels: prefixPeerModels,
 	}, nil
 }
 
@@ -151,29 +174,63 @@ func (p *PeerProxy) ListPeers() config.PeerDictionaryConfig {
 	return p.peers
 }
 
+func (p *PeerProxy) PrefixPeerModels() bool {
+	return p.prefixPeerModels
+}
+
+func (p *PeerProxy) IsModelPrefixed(modelID string) bool {
+	return p.prefixedModels[modelID]
+}
+
+func (p *PeerProxy) GetOriginalModelName(modelID string) string {
+	if !p.prefixedModels[modelID] {
+		return modelID
+	}
+	if _, after, found := strings.Cut(modelID, "/"); found {
+		return after
+	}
+	return modelID
+}
+
 func (pp *peerProxyMember) processQueue() {
-	for req := range pp.queue {
-		select {
-		case pp.sem <- struct{}{}:
-			pp.reverseProxy.ServeHTTP(req.writer, req.request)
-			<-pp.sem
-		case <-time.After(pp.queueTimeout):
-			http.Error(req.writer, "request timed out waiting in queue", http.StatusServiceUnavailable)
+	defer func() {
+		if r := recover(); r != nil {
+			pp.logger.Warnf("peer %s: processQueue panic recovered: %v", pp.peerID, r)
 		}
-		close(req.done)
+	}()
+
+	for {
+		select {
+		case req := <-pp.queue:
+			select {
+			case pp.sem <- struct{}{}:
+				pp.reverseProxy.ServeHTTP(req.writer, req.request)
+				<-pp.sem
+			case <-time.After(pp.queueTimeout):
+				http.Error(req.writer, "request timed out waiting in queue", http.StatusServiceUnavailable)
+			}
+			close(req.done)
+		case <-pp.stopCh:
+			for len(pp.queue) > 0 {
+				req := <-pp.queue
+				http.Error(req.writer, "server shutting down", http.StatusServiceUnavailable)
+				close(req.done)
+			}
+			return
+		}
 	}
 }
 
-func (pp *peerProxyMember) serveWithConcurrencyControl(writer http.ResponseWriter, request *http.Request) bool {
+func (pp *peerProxyMember) serveWithConcurrencyControl(writer http.ResponseWriter, request *http.Request) serveResult {
 	if pp.maxConcurrent == 0 {
-		return true
+		return serveContinue
 	}
 
 	select {
 	case pp.sem <- struct{}{}:
 		pp.reverseProxy.ServeHTTP(writer, request)
 		<-pp.sem
-		return false
+		return serveHandled
 	default:
 	}
 
@@ -187,11 +244,11 @@ func (pp *peerProxyMember) serveWithConcurrencyControl(writer http.ResponseWrite
 	select {
 	case pp.queue <- qr:
 		<-done
-		return false
+		return serveHandled
 	default:
 		pp.logger.Warnf("peer %s: queue full, rejecting request", pp.peerID)
 		http.Error(writer, "peer concurrency queue full", http.StatusServiceUnavailable)
-		return false
+		return serveHandled
 	}
 }
 
@@ -221,7 +278,7 @@ func (p *PeerProxy) ProxyRequest(model_id string, writer http.ResponseWriter, re
 		}
 	}
 
-	if !pp.serveWithConcurrencyControl(writer, request) {
+	if pp.serveWithConcurrencyControl(writer, request) == serveHandled {
 		return nil
 	}
 

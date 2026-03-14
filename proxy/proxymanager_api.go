@@ -91,9 +91,17 @@ func (pm *ProxyManager) getModelStatus() []Model {
 	// Iterate over the peer models
 	if pm.peerProxy != nil {
 		for peerID, peer := range pm.peerProxy.ListPeers() {
+			peerPrefix := pm.config.PrefixPeerModels
+			if peer.PrefixPeerModels != nil {
+				peerPrefix = *peer.PrefixPeerModels
+			}
 			for _, modelID := range peer.Models {
+				displayID := modelID
+				if peerPrefix {
+					displayID = peerID + "/" + modelID
+				}
 				models = append(models, Model{
-					Id:     modelID,
+					Id:     displayID,
 					PeerID: peerID,
 				})
 			}

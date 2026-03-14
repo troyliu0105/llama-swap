@@ -155,6 +155,9 @@ type Config struct {
 
 	// support remote peers, see issue #433, #296
 	Peers PeerDictionaryConfig `yaml:"peers"`
+
+	// prefix peer model names with peer ID (e.g., "opencode/big-pickle")
+	PrefixPeerModels bool `yaml:"prefixPeerModels"`
 }
 
 func (c *Config) RealModelName(search string) (string, bool) {

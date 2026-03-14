@@ -17,7 +17,7 @@ import (
 
 func TestNewPeerProxy_EmptyPeers(t *testing.T) {
 	peers := config.PeerDictionaryConfig{}
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 	assert.NotNil(t, pm)
 	assert.Empty(t, pm.proxyMap)
@@ -34,7 +34,7 @@ func TestNewPeerProxy_SinglePeer(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 	assert.Len(t, pm.proxyMap, 2)
 	assert.True(t, pm.HasPeerModel("model-a"))
@@ -58,7 +58,7 @@ func TestNewPeerProxy_MultiplePeers(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 	assert.Len(t, pm.proxyMap, 4)
 	assert.True(t, pm.HasPeerModel("model-a"))
@@ -85,7 +85,7 @@ func TestNewPeerProxy_DuplicateModelWarning(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 	// Should only have one entry for the duplicate model
 	assert.Len(t, pm.proxyMap, 1)
@@ -102,7 +102,7 @@ func TestHasPeerModel(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	assert.True(t, pm.HasPeerModel("existing-model"))
@@ -111,7 +111,7 @@ func TestHasPeerModel(t *testing.T) {
 
 func TestProxyRequest_ModelNotFound(t *testing.T) {
 	peers := config.PeerDictionaryConfig{}
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -139,7 +139,7 @@ func TestProxyRequest_Success(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -170,7 +170,7 @@ func TestProxyRequest_ApiKeyInjection(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -200,7 +200,7 @@ func TestProxyRequest_NoApiKey(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -229,7 +229,7 @@ func TestProxyRequest_HostHeaderSet(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -258,7 +258,7 @@ func TestProxyRequest_SSEHeaderModification(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -290,7 +290,7 @@ func TestProxyRequest_HeaderOverride(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -325,7 +325,7 @@ func TestProxyRequest_HeaderDelete(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -361,7 +361,7 @@ func TestProxyRequest_HeaderOverrideAfterApiKey(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -402,7 +402,7 @@ func TestProxyRequest_ConcurrencyLimit(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -440,7 +440,7 @@ func TestProxyRequest_QueueFull(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -491,7 +491,7 @@ func TestProxyRequest_NoConcurrencyLimit(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -527,7 +527,7 @@ func TestProxyRequest_StripV1Prefix(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -556,7 +556,7 @@ func TestProxyRequest_NoStripV1Prefix(t *testing.T) {
 		},
 	}
 
-	pm, err := NewPeerProxy(peers, testLogger)
+	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -565,4 +565,134 @@ func TestProxyRequest_NoStripV1Prefix(t *testing.T) {
 	err = pm.ProxyRequest("test-model", w, req)
 	assert.NoError(t, err)
 	assert.Equal(t, "/v1/chat/completions", receivedPath)
+}
+
+func TestNewPeerProxy_PrefixPeerModels(t *testing.T) {
+	proxyURL, _ := url.Parse("http://peer1.example.com:8080")
+	peers := config.PeerDictionaryConfig{
+		"opencode": config.PeerConfig{
+			Proxy:    "http://peer1.example.com:8080",
+			ProxyURL: proxyURL,
+			Models:   []string{"big-pickle", "small-pickle"},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, true, testLogger)
+	require.NoError(t, err)
+	assert.Len(t, pm.proxyMap, 2)
+	assert.True(t, pm.HasPeerModel("opencode/big-pickle"))
+	assert.True(t, pm.HasPeerModel("opencode/small-pickle"))
+	assert.False(t, pm.HasPeerModel("big-pickle"))
+	assert.False(t, pm.HasPeerModel("small-pickle"))
+	assert.True(t, pm.PrefixPeerModels())
+}
+
+func TestNewPeerProxy_NoPrefixPeerModels(t *testing.T) {
+	proxyURL, _ := url.Parse("http://peer1.example.com:8080")
+	peers := config.PeerDictionaryConfig{
+		"opencode": config.PeerConfig{
+			Proxy:    "http://peer1.example.com:8080",
+			ProxyURL: proxyURL,
+			Models:   []string{"big-pickle", "small-pickle"},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+	assert.Len(t, pm.proxyMap, 2)
+	assert.True(t, pm.HasPeerModel("big-pickle"))
+	assert.True(t, pm.HasPeerModel("small-pickle"))
+	assert.False(t, pm.HasPeerModel("opencode/big-pickle"))
+	assert.False(t, pm.PrefixPeerModels())
+}
+
+func TestGetOriginalModelName(t *testing.T) {
+	proxyURL, _ := url.Parse("http://peer1.example.com:8080")
+	peers := config.PeerDictionaryConfig{
+		"opencode": config.PeerConfig{
+			Proxy:    "http://peer1.example.com:8080",
+			ProxyURL: proxyURL,
+			Models:   []string{"big-pickle"},
+		},
+	}
+
+	t.Run("with prefix enabled", func(t *testing.T) {
+		pm, err := NewPeerProxy(peers, true, testLogger)
+		require.NoError(t, err)
+		assert.Equal(t, "big-pickle", pm.GetOriginalModelName("opencode/big-pickle"))
+		assert.Equal(t, "no-slash", pm.GetOriginalModelName("no-slash"))
+	})
+
+	t.Run("with prefix disabled", func(t *testing.T) {
+		pm, err := NewPeerProxy(peers, false, testLogger)
+		require.NoError(t, err)
+		assert.Equal(t, "big-pickle", pm.GetOriginalModelName("big-pickle"))
+		assert.Equal(t, "opencode/big-pickle", pm.GetOriginalModelName("opencode/big-pickle"))
+	})
+}
+
+func TestNewPeerProxy_PerPeerPrefix(t *testing.T) {
+	proxyURL1, _ := url.Parse("http://peer1.example.com:8080")
+	proxyURL2, _ := url.Parse("http://peer2.example.com:8080")
+	trueVal := true
+	falseVal := false
+
+	peers := config.PeerDictionaryConfig{
+		"opencode": config.PeerConfig{
+			Proxy:            "http://peer1.example.com:8080",
+			ProxyURL:         proxyURL1,
+			Models:           []string{"big-pickle"},
+			PrefixPeerModels: &trueVal,
+		},
+		"anthropic": config.PeerConfig{
+			Proxy:            "http://peer2.example.com:8080",
+			ProxyURL:         proxyURL2,
+			Models:           []string{"claude-3"},
+			PrefixPeerModels: &falseVal,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	assert.True(t, pm.HasPeerModel("opencode/big-pickle"))
+	assert.False(t, pm.HasPeerModel("big-pickle"))
+	assert.True(t, pm.IsModelPrefixed("opencode/big-pickle"))
+
+	assert.True(t, pm.HasPeerModel("claude-3"))
+	assert.False(t, pm.HasPeerModel("anthropic/claude-3"))
+	assert.False(t, pm.IsModelPrefixed("claude-3"))
+
+	assert.Equal(t, "big-pickle", pm.GetOriginalModelName("opencode/big-pickle"))
+	assert.Equal(t, "claude-3", pm.GetOriginalModelName("claude-3"))
+}
+
+func TestNewPeerProxy_PerPeerPrefixOverrideGlobal(t *testing.T) {
+	proxyURL1, _ := url.Parse("http://peer1.example.com:8080")
+	proxyURL2, _ := url.Parse("http://peer2.example.com:8080")
+	falseVal := false
+
+	peers := config.PeerDictionaryConfig{
+		"opencode": config.PeerConfig{
+			Proxy:    "http://peer1.example.com:8080",
+			ProxyURL: proxyURL1,
+			Models:   []string{"big-pickle"},
+		},
+		"anthropic": config.PeerConfig{
+			Proxy:            "http://peer2.example.com:8080",
+			ProxyURL:         proxyURL2,
+			Models:           []string{"claude-3"},
+			PrefixPeerModels: &falseVal,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, true, testLogger)
+	require.NoError(t, err)
+
+	assert.True(t, pm.HasPeerModel("opencode/big-pickle"))
+	assert.True(t, pm.IsModelPrefixed("opencode/big-pickle"))
+
+	assert.True(t, pm.HasPeerModel("claude-3"))
+	assert.False(t, pm.HasPeerModel("anthropic/claude-3"))
+	assert.False(t, pm.IsModelPrefixed("claude-3"))
 }
