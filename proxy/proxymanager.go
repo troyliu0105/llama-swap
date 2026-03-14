@@ -752,6 +752,15 @@ func (pm *ProxyManager) proxyInferenceHandler(c *gin.Context) {
 		pm.proxyLogger.Debugf("ProxyManager using ProxyPeer for model: %s", requestedModel)
 		modelID = requestedModel
 
+		originalModelName := pm.peerProxy.GetOriginalModelName(requestedModel)
+		if originalModelName != requestedModel {
+			bodyBytes, err = sjson.SetBytes(bodyBytes, "model", originalModelName)
+			if err != nil {
+				pm.sendErrorResponse(c, http.StatusInternalServerError, "error replacing model name in request")
+				return
+			}
+		}
+
 		// issue #453 apply filters for peer requests
 		peerFilters := pm.peerProxy.GetPeerFilters(requestedModel)
 
@@ -850,6 +859,7 @@ func (pm *ProxyManager) proxyOAIPostFormHandler(c *gin.Context) {
 	} else if pm.peerProxy != nil && pm.peerProxy.HasPeerModel(requestedModel) {
 		pm.proxyLogger.Debugf("ProxyManager using ProxyPeer for model: %s", requestedModel)
 		modelID = requestedModel
+		useModelName = pm.peerProxy.GetOriginalModelName(requestedModel)
 		nextHandler = pm.peerProxy.ProxyRequest
 	}
 
