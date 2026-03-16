@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -977,4 +978,176 @@ func TestProxyRequest_QueueFIFO_MultipleSlots(t *testing.T) {
 
 	expected := []int{1, 2, 3, 4, 5, 6}
 	assert.Equal(t, expected, processOrder, "Requests should be processed in FIFO order even with multiple slots")
+}
+
+func TestProxyRequest_ContextCancellation_WhileQueued(t *testing.T) {
+	blockChan := make(chan struct{})
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-blockChan
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:         testServer.URL,
+			ProxyURL:      proxyURL,
+			Models:        []string{"test-model"},
+			MaxConcurrent: 1,
+			QueueSize:     10,
+			QueueTimeout:  5 * time.Second,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	results := make([]int, 3)
+	var mu sync.Mutex
+
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			if idx == 2 {
+				time.Sleep(50 * time.Millisecond)
+				cancel()
+			}
+
+			pm.ProxyRequest("test-model", w, req)
+
+			mu.Lock()
+			results[idx] = w.Code
+			mu.Unlock()
+		}(i)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	close(blockChan)
+	wg.Wait()
+
+	successCount := 0
+	cancelledCount := 0
+	for _, code := range results {
+		if code == http.StatusOK {
+			successCount++
+		}
+		if code == 499 {
+			cancelledCount++
+		}
+	}
+
+	assert.Equal(t, 2, successCount, "Expected 2 successful requests")
+	assert.Equal(t, 1, cancelledCount, "Expected 1 cancelled request (499)")
+	t.Logf("Results: %v (success=%d, cancelled=%d)", results, successCount, cancelledCount)
+}
+
+func TestProxyRequest_ContextCancellation_WhileWaitingForSlot(t *testing.T) {
+	blockChan := make(chan struct{})
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-blockChan
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:         testServer.URL,
+			ProxyURL:      proxyURL,
+			Models:        []string{"test-model"},
+			MaxConcurrent: 1,
+			QueueSize:     10,
+			QueueTimeout:  5 * time.Second,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	results := make([]int, 2)
+	var mu sync.Mutex
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			if idx == 1 {
+				time.Sleep(50 * time.Millisecond)
+				cancel()
+			}
+
+			pm.ProxyRequest("test-model", w, req)
+
+			mu.Lock()
+			results[idx] = w.Code
+			mu.Unlock()
+		}(i)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	close(blockChan)
+	wg.Wait()
+
+	assert.Equal(t, http.StatusOK, results[0], "First request should succeed")
+	assert.Equal(t, 499, results[1], "Second request should be cancelled while queued")
+	t.Logf("Results: %v", results)
+}
+
+func TestProxyRequest_ContextCancellation_DirectPath(t *testing.T) {
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			Models:   []string{"test-model"},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pm.ProxyRequest("test-model", w, req)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	wg.Wait()
+
+	assert.Equal(t, 499, w.Code, "Expected 499 Client Closed Request when context cancelled during proxy")
 }
