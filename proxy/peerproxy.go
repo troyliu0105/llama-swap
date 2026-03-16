@@ -309,6 +309,17 @@ func (pp *peerProxyMember) processQueue() {
 		select {
 		case req := <-pp.queue:
 			go func(qr *queuedRequest) {
+				// recover from http.ErrAbortHandler panics that can occur when the client
+				// disconnects before the response is sent
+				defer func() {
+					if r := recover(); r != nil {
+						if r == http.ErrAbortHandler {
+							pp.logger.Warnf("peer %s: recovered from client disconnection during streaming", pp.peerID)
+						} else {
+							pp.logger.Warnf("peer %s: recovered from panic: %v", pp.peerID, r)
+						}
+					}
+				}()
 				defer atomic.AddInt32(&pp.waitingCount, -1)
 				select {
 				case pp.sem <- struct{}{}:
