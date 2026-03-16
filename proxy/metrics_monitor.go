@@ -243,7 +243,11 @@ func (mp *metricsMonitor) wrapHandler(
 	}
 	if strings.Contains(recorder.Header().Get("Content-Type"), "text/event-stream") {
 		if parsed, err := processStreamingResponse(modelID, requestStart, body); err != nil {
-			mp.logger.Warnf("error processing streaming response: %v, path=%s, recording minimal metrics", err, request.URL.Path)
+			bodyPreview := string(body)
+			if len(bodyPreview) > 512 {
+				bodyPreview = bodyPreview[:512] + "... (truncated)"
+			}
+			mp.logger.Warnf("error processing streaming response: %v, path=%s, body=%s, recording minimal metrics", err, request.URL.Path, bodyPreview)
 		} else {
 			tm = parsed
 		}

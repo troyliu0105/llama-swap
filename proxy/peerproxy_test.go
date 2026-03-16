@@ -1,9 +1,13 @@
 package proxy
 
 import (
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +18,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func captureStdout(f func()) string {
+	r, w, _ := os.Pipe()
+	old := os.Stdout
+	os.Stdout = w
+
+	f()
+
+	w.Close()
+	os.Stdout = old
+
+	var buf strings.Builder
+	io.Copy(&buf, r)
+	return buf.String()
+}
 
 func TestNewPeerProxy_EmptyPeers(t *testing.T) {
 	peers := config.PeerDictionaryConfig{}
@@ -509,6 +528,113 @@ func TestProxyRequest_NoConcurrencyLimit(t *testing.T) {
 	wg.Wait()
 }
 
+func TestProxyRequest_QueueTiming(t *testing.T) {
+	var activeCount int32
+	var maxActive int32
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := atomic.AddInt32(&activeCount, 1)
+		for {
+			old := atomic.LoadInt32(&maxActive)
+			if cur <= old || atomic.CompareAndSwapInt32(&maxActive, old, cur) {
+				break
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+		atomic.AddInt32(&activeCount, -1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:         testServer.URL,
+			ProxyURL:      proxyURL,
+			Models:        []string{"test-model"},
+			MaxConcurrent: 2,
+			QueueSize:     10,
+			QueueTimeout:  5 * time.Second,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	start := time.Now()
+	var wg sync.WaitGroup
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			w := httptest.NewRecorder()
+			pm.ProxyRequest("test-model", w, req)
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	assert.LessOrEqual(t, atomic.LoadInt32(&maxActive), int32(2), "max concurrent should not exceed 2")
+
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Queue timing issue: took %v, expected ~300ms for 4 requests with 2 slots and 150ms each", elapsed)
+	}
+
+	t.Logf("4 requests with 2 slots (150ms each) completed in %v", elapsed)
+}
+
+func TestProxyRequest_QueueFIFO(t *testing.T) {
+	var mu sync.Mutex
+	processOrder := []int{}
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idStr := r.Header.Get("X-Request-Id")
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		processOrder = append(processOrder, int(idStr[0]-'0'))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:         testServer.URL,
+			ProxyURL:      proxyURL,
+			Models:        []string{"test-model"},
+			MaxConcurrent: 1,
+			QueueSize:     10,
+			QueueTimeout:  10 * time.Second,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+
+	for i := 1; i <= 5; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			req.Header.Set("X-Request-Id", fmt.Sprintf("%d", id))
+			w := httptest.NewRecorder()
+			pm.ProxyRequest("test-model", w, req)
+		}(i)
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	wg.Wait()
+
+	expected := []int{1, 2, 3, 4, 5}
+	assert.Equal(t, expected, processOrder, "Requests should be processed in FIFO order")
+	t.Logf("Process order: %v", processOrder)
+}
+
 func TestProxyRequest_StripV1Prefix(t *testing.T) {
 	var receivedPath string
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -695,4 +821,160 @@ func TestNewPeerProxy_PerPeerPrefixOverrideGlobal(t *testing.T) {
 	assert.True(t, pm.HasPeerModel("claude-3"))
 	assert.False(t, pm.HasPeerModel("anthropic/claude-3"))
 	assert.False(t, pm.IsModelPrefixed("claude-3"))
+}
+
+func TestPeerProxy_LogsNon200ResponseToStdout(t *testing.T) {
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error": "peer overloaded", "code": 503}`))
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			Models:   []string{"test-model"},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	output := captureStdout(func() {
+		err := pm.ProxyRequest("test-model", w, req)
+		assert.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "peer1")
+	assert.Contains(t, output, "503")
+	assert.Contains(t, output, "peer overloaded")
+}
+
+func TestPeerProxy_LogsBusinessError200ToStdout(t *testing.T) {
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"error": {"message": "invalid model", "type": "invalid_request_error"}}`))
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			Models:   []string{"test-model"},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	output := captureStdout(func() {
+		err := pm.ProxyRequest("test-model", w, req)
+		assert.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "peer1")
+	assert.Contains(t, output, "invalid model")
+}
+
+func TestPeerProxy_LogsTimeoutToStdout(t *testing.T) {
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			Models:   []string{"test-model"},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	member := pm.proxyMap["test-model"]
+	transport := member.reverseProxy.Transport.(*http.Transport)
+	oldTimeout := transport.ResponseHeaderTimeout
+	transport.ResponseHeaderTimeout = 50 * time.Millisecond
+	defer func() { transport.ResponseHeaderTimeout = oldTimeout }()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+
+	w := httptest.NewRecorder()
+
+	output := captureStdout(func() {
+		err := pm.ProxyRequest("test-model", w, req)
+		assert.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "peer1")
+	assert.Contains(t, output, "timeout")
+}
+
+func TestProxyRequest_QueueFIFO_MultipleSlots(t *testing.T) {
+	var mu sync.Mutex
+	processOrder := []int{}
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idStr := r.Header.Get("X-Request-Id")
+		id, _ := strconv.Atoi(idStr)
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		processOrder = append(processOrder, id)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:         testServer.URL,
+			ProxyURL:      proxyURL,
+			Models:        []string{"test-model"},
+			MaxConcurrent: 2,
+			QueueSize:     10,
+			QueueTimeout:  10 * time.Second,
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+
+	for i := 1; i <= 6; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			req.Header.Set("X-Request-Id", strconv.Itoa(id))
+			w := httptest.NewRecorder()
+			pm.ProxyRequest("test-model", w, req)
+		}(i)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	wg.Wait()
+
+	t.Logf("Process order: %v", processOrder)
+	t.Logf("Expected FIFO: [1 2 3 4 5 6]")
+
+	expected := []int{1, 2, 3, 4, 5, 6}
+	assert.Equal(t, expected, processOrder, "Requests should be processed in FIFO order even with multiple slots")
 }

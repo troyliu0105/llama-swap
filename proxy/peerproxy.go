@@ -1,13 +1,18 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mostlygeek/llama-swap/proxy/config"
@@ -20,13 +25,18 @@ type peerProxyMember struct {
 	headers       map[string]string
 	stripV1Prefix bool
 
-	maxConcurrent int
-	queueSize     int
-	queueTimeout  time.Duration
-	sem           chan struct{}
-	queue         chan *queuedRequest
-	logger        *LogMonitor
-	stopCh        chan struct{}
+	maxConcurrent   int
+	queueSize       int
+	queueTimeout    time.Duration
+	requestInterval time.Duration
+	sem             chan struct{}
+	queue           chan *queuedRequest
+	waitingCount    int32
+	logger          *LogMonitor
+	stopCh          chan struct{}
+
+	lastRequestMu   sync.Mutex
+	lastRequestTime time.Time
 }
 
 type serveResult int
@@ -81,6 +91,7 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, prox
 		reverseProxy := httputil.NewSingleHostReverseProxy(peer.ProxyURL)
 		reverseProxy.Transport = peerTransport
 
+		currentPeerID := peerID // capture for closure
 		// Wrap Director to set Host header for remote hosts (not localhost)
 		originalDirector := reverseProxy.Director
 		reverseProxy.Director = func(req *http.Request) {
@@ -90,14 +101,78 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, prox
 		}
 
 		reverseProxy.ModifyResponse = func(resp *http.Response) error {
-			if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+			contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+			isSSE := strings.Contains(contentType, "text/event-stream")
+
+			// SSE 响应设置 header 并直接返回，不读取 body 以保持 streaming
+			if isSSE {
 				resp.Header.Set("X-Accel-Buffering", "no")
+				return nil
+			}
+
+			// 非 SSE 响应：读取 body 进行日志记录
+			var body []byte
+			var readErr error
+			if resp.Body != nil {
+				body, readErr = io.ReadAll(resp.Body)
+				if readErr == nil {
+					resp.Body.Close()
+					resp.Body = io.NopCloser(bytes.NewReader(body))
+				}
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				logBody := string(body)
+				if len(logBody) > 512 {
+					logBody = logBody[:512] + "..."
+				}
+				logBody = strings.ReplaceAll(logBody, "\n", " ")
+				fmt.Printf("[PEER ERROR] peer=%s status=%d method=%s path=%s error=%s\n",
+					currentPeerID, resp.StatusCode, resp.Request.Method, resp.Request.URL.Path, logBody)
+			} else if resp.StatusCode == http.StatusOK && len(body) > 0 {
+				contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+				if strings.Contains(contentType, "application/json") {
+					if bytes.Contains(body, []byte("\"error\"")) {
+						logBody := string(body)
+						if len(logBody) > 512 {
+							logBody = logBody[:512] + "..."
+						}
+						logBody = strings.ReplaceAll(logBody, "\n", " ")
+						fmt.Printf("[PEER ERROR] peer=%s business_error=%s\n", currentPeerID, logBody)
+					}
+				}
+			}
+
+			if proxyLogger.IsLevelEnabled(LevelTrace) && readErr == nil {
+				contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+				if strings.Contains(contentType, "application/json") || strings.Contains(contentType, "text/") {
+					logBody := string(body)
+					if len(logBody) > 1024 {
+						logBody = logBody[:1024] + "... (truncated)"
+					}
+					proxyLogger.Tracef("Peer %s response body: %s", currentPeerID, logBody)
+				} else {
+					proxyLogger.Tracef("Peer %s response body: [binary data, type=%s, size=%d]", currentPeerID, contentType, len(body))
+				}
 			}
 			return nil
 		}
 
 		reverseProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			proxyLogger.Warnf("peer %s: proxy error: %v", peerID, err)
+
+			errStr := err.Error()
+			timeoutIndicator := ""
+			lowerErr := strings.ToLower(errStr)
+			if strings.Contains(lowerErr, "timeout") ||
+				strings.Contains(lowerErr, "deadline exceeded") ||
+				strings.Contains(lowerErr, "context deadline") ||
+				strings.Contains(lowerErr, "read timed out") {
+				timeoutIndicator = "timeout "
+			}
+
+			fmt.Printf("[PEER ERROR] peer=%s %serror=%s\n", peerID, timeoutIndicator, errStr)
+
 			errMsg := fmt.Sprintf("peer proxy error: %v", err)
 			if runtime.GOOS == "darwin" && strings.Contains(err.Error(), "connect: no route to host") {
 				errMsg += " (hint: on macOS, check System Settings > Privacy & Security > Local Network permissions)"
@@ -106,15 +181,16 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, prox
 		}
 
 		pp := &peerProxyMember{
-			peerID:        peerID,
-			reverseProxy:  reverseProxy,
-			apiKey:        peer.ApiKey,
-			headers:       peer.Headers,
-			stripV1Prefix: peer.StripV1Prefix,
-			maxConcurrent: peer.MaxConcurrent,
-			queueSize:     peer.QueueSize,
-			queueTimeout:  peer.QueueTimeout,
-			logger:        proxyLogger,
+			peerID:          peerID,
+			reverseProxy:    reverseProxy,
+			apiKey:          peer.ApiKey,
+			headers:         peer.Headers,
+			stripV1Prefix:   peer.StripV1Prefix,
+			maxConcurrent:   peer.MaxConcurrent,
+			queueSize:       peer.QueueSize,
+			queueTimeout:    peer.QueueTimeout,
+			requestInterval: peer.RequestInterval,
+			logger:          proxyLogger,
 		}
 
 		if peer.MaxConcurrent > 0 {
@@ -192,6 +268,36 @@ func (p *PeerProxy) GetOriginalModelName(modelID string) string {
 	return modelID
 }
 
+func (pp *peerProxyMember) waitForRequestInterval(ctx context.Context, requestPath string) error {
+	if pp.requestInterval <= 0 {
+		return nil
+	}
+
+	pp.lastRequestMu.Lock()
+	now := time.Now()
+	elapsed := now.Sub(pp.lastRequestTime)
+	var waitTime time.Duration
+	if elapsed < pp.requestInterval {
+		waitTime = pp.requestInterval - elapsed
+		pp.lastRequestTime = now.Add(waitTime)
+	} else {
+		pp.lastRequestTime = now
+	}
+	pp.lastRequestMu.Unlock()
+
+	if waitTime > 0 {
+		fmt.Printf("[PEER] peer=%s rate_limit waiting=%dms path=%s\n",
+			pp.peerID, waitTime.Milliseconds(), requestPath)
+		select {
+		case <-time.After(waitTime):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 func (pp *peerProxyMember) processQueue() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -202,17 +308,32 @@ func (pp *peerProxyMember) processQueue() {
 	for {
 		select {
 		case req := <-pp.queue:
-			select {
-			case pp.sem <- struct{}{}:
-				pp.reverseProxy.ServeHTTP(req.writer, req.request)
-				<-pp.sem
-			case <-time.After(pp.queueTimeout):
-				http.Error(req.writer, "request timed out waiting in queue", http.StatusServiceUnavailable)
-			}
-			close(req.done)
+			go func(qr *queuedRequest) {
+				defer atomic.AddInt32(&pp.waitingCount, -1)
+				select {
+				case pp.sem <- struct{}{}:
+					fmt.Printf("[PEER] peer=%s dequeued active=%d/%d queue=%d path=%s\n",
+						pp.peerID, len(pp.sem), pp.maxConcurrent, int(atomic.LoadInt32(&pp.waitingCount)), qr.request.URL.Path)
+					if err := pp.waitForRequestInterval(qr.request.Context(), qr.request.URL.Path); err != nil {
+						fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
+							pp.peerID, qr.request.URL.Path, err)
+						http.Error(qr.writer, err.Error(), http.StatusServiceUnavailable)
+						<-pp.sem
+					} else {
+						pp.reverseProxy.ServeHTTP(qr.writer, qr.request)
+						<-pp.sem
+					}
+				case <-time.After(pp.queueTimeout):
+					fmt.Printf("[PEER ERROR] peer=%s queue_timeout waiting=%ds path=%s\n",
+						pp.peerID, int(pp.queueTimeout.Seconds()), qr.request.URL.Path)
+					http.Error(qr.writer, "request timed out waiting in queue", http.StatusServiceUnavailable)
+				}
+				close(qr.done)
+			}(req)
 		case <-pp.stopCh:
 			for len(pp.queue) > 0 {
 				req := <-pp.queue
+				atomic.AddInt32(&pp.waitingCount, -1)
 				http.Error(req.writer, "server shutting down", http.StatusServiceUnavailable)
 				close(req.done)
 			}
@@ -226,14 +347,31 @@ func (pp *peerProxyMember) serveWithConcurrencyControl(writer http.ResponseWrite
 		return serveContinue
 	}
 
+	fmt.Printf("[PEER] peer=%s recv active=%d/%d queue=%d/%d path=%s\n",
+		pp.peerID, len(pp.sem), pp.maxConcurrent, int(atomic.LoadInt32(&pp.waitingCount)), pp.queueSize, request.URL.Path)
+
 	select {
 	case pp.sem <- struct{}{}:
+		if err := pp.waitForRequestInterval(request.Context(), request.URL.Path); err != nil {
+			fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
+				pp.peerID, request.URL.Path, err)
+			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+			<-pp.sem
+			return serveHandled
+		}
 		pp.reverseProxy.ServeHTTP(writer, request)
 		<-pp.sem
 		return serveHandled
 	default:
 	}
 
+	if int(atomic.LoadInt32(&pp.waitingCount)) >= pp.queueSize {
+		pp.logger.Warnf("peer %s: queue full, rejecting request", pp.peerID)
+		http.Error(writer, "peer concurrency queue full", http.StatusServiceUnavailable)
+		return serveHandled
+	}
+
+	atomic.AddInt32(&pp.waitingCount, 1)
 	done := make(chan struct{}, 1)
 	qr := &queuedRequest{
 		writer:  writer,
@@ -246,6 +384,7 @@ func (pp *peerProxyMember) serveWithConcurrencyControl(writer http.ResponseWrite
 		<-done
 		return serveHandled
 	default:
+		atomic.AddInt32(&pp.waitingCount, -1)
 		pp.logger.Warnf("peer %s: queue full, rejecting request", pp.peerID)
 		http.Error(writer, "peer concurrency queue full", http.StatusServiceUnavailable)
 		return serveHandled
@@ -282,6 +421,12 @@ func (p *PeerProxy) ProxyRequest(model_id string, writer http.ResponseWriter, re
 		return nil
 	}
 
+	if err := pp.waitForRequestInterval(request.Context(), request.URL.Path); err != nil {
+		fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
+			pp.peerID, request.URL.Path, err)
+		http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+		return nil
+	}
 	pp.reverseProxy.ServeHTTP(writer, request)
 	return nil
 }

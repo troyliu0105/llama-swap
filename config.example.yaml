@@ -477,6 +477,15 @@ peers:
     # - optional, default: 60s
     queueTimeout: 30s
 
+    # requestInterval: minimum time between request starts to this peer
+    # - optional, default: 0 (disabled)
+    # - useful for rate limiting to prevent 429 errors from upstream providers
+    # - value is a duration string (e.g., "500ms", "1s", "2.5s")
+    # - enforces a delay between when requests START, not when they complete
+    # - example: with 500ms interval, if request A starts at T=0, request B
+    #   will wait until T=500ms before starting, even if A is still running
+    requestInterval: 500ms
+
     # stripV1Prefix: remove /v1 prefix from request path before forwarding
     # - optional, default: false
     # - useful for APIs that don't use /v1 prefix (e.g., some provider-specific endpoints)

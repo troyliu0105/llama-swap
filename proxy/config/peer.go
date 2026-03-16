@@ -17,6 +17,7 @@ type PeerConfig struct {
 	MaxConcurrent    int               `yaml:"maxConcurrent"`
 	QueueSize        int               `yaml:"queueSize"`
 	QueueTimeout     time.Duration     `yaml:"queueTimeout"`
+	RequestInterval  time.Duration     `yaml:"requestInterval"`
 	StripV1Prefix    bool              `yaml:"stripV1Prefix"`
 	PrefixPeerModels *bool             `yaml:"prefixPeerModels"`
 }
