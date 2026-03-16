@@ -106,6 +106,25 @@ func NewProcess(ID string, healthCheckTimeout int, config config.ModelConfig, pr
 			if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 				resp.Header.Set("X-Accel-Buffering", "no")
 			}
+
+			if proxyLogger.IsLevelEnabled(LevelTrace) {
+				body, err := io.ReadAll(resp.Body)
+				if err == nil {
+					resp.Body.Close()
+					contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+					if strings.Contains(contentType, "application/json") || strings.Contains(contentType, "text/") {
+						logBody := string(body)
+						if len(logBody) > 1024 {
+							logBody = logBody[:1024] + "... (truncated)"
+						}
+						proxyLogger.Tracef("[%s] Response body: %s", ID, logBody)
+					} else {
+						proxyLogger.Tracef("[%s] Response body: [binary data, type=%s, size=%d]", ID, contentType, len(body))
+					}
+					resp.Body = io.NopCloser(bytes.NewReader(body))
+				}
+			}
+
 			if resp.Request != nil {
 				applySigmoid, _ := resp.Request.Context().Value(proxyCtxKey("rerankSigmoidScores")).(bool)
 				if applySigmoid {

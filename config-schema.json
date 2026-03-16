@@ -57,13 +57,14 @@
         "logLevel": {
             "type": "string",
             "enum": [
+                "trace",
                 "debug",
                 "info",
                 "warn",
                 "error"
             ],
             "default": "info",
-            "description": "Sets the logging value. Valid values: debug, info, warn, error."
+            "description": "Sets the logging value. Valid values: trace, debug, info, warn, error."
         },
         "logTimeFormat": {
             "type": "string",

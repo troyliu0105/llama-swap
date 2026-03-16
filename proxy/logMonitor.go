@@ -93,7 +93,8 @@ func (cb *circularBuffer) GetHistory() []byte {
 type LogLevel int
 
 const (
-	LevelDebug LogLevel = iota
+	LevelTrace LogLevel = iota
+	LevelDebug
 	LevelInfo
 	LevelWarn
 	LevelError
@@ -221,6 +222,16 @@ func (w *LogMonitor) log(level LogLevel, msg string) {
 	w.Write(w.formatMessage(level.String(), msg))
 }
 
+func (w *LogMonitor) IsLevelEnabled(level LogLevel) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return level >= w.level
+}
+
+func (w *LogMonitor) Trace(msg string) {
+	w.log(LevelTrace, msg)
+}
+
 func (w *LogMonitor) Debug(msg string) {
 	w.log(LevelDebug, msg)
 }
@@ -235,6 +246,10 @@ func (w *LogMonitor) Warn(msg string) {
 
 func (w *LogMonitor) Error(msg string) {
 	w.log(LevelError, msg)
+}
+
+func (w *LogMonitor) Tracef(format string, args ...interface{}) {
+	w.log(LevelTrace, fmt.Sprintf(format, args...))
 }
 
 func (w *LogMonitor) Debugf(format string, args ...interface{}) {
@@ -255,6 +270,8 @@ func (w *LogMonitor) Errorf(format string, args ...interface{}) {
 
 func (l LogLevel) String() string {
 	switch l {
+	case LevelTrace:
+		return "TRACE"
 	case LevelDebug:
 		return "DEBUG"
 	case LevelInfo:

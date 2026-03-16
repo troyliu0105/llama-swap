@@ -114,7 +114,7 @@ healthCheckTimeout: 500
 
 # logLevel: sets the logging value
 # - optional, default: info
-# - Valid log levels: debug, info, warn, error
+# - Valid log levels: trace, debug, info, warn, error
 logLevel: info
 
 # logTimeFormat: enables and sets the logging timestamp format

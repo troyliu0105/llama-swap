@@ -224,6 +224,32 @@ func TestLogMonitor_ClearAndReuse(t *testing.T) {
 	}
 }
 
+func TestLogMonitor_Levels(t *testing.T) {
+	var buf bytes.Buffer
+	lm := NewLogMonitorWriter(&buf)
+
+	tests := []struct {
+		level    LogLevel
+		set      LogLevel
+		expected bool
+	}{
+		{LevelTrace, LevelTrace, true},
+		{LevelTrace, LevelDebug, false},
+		{LevelDebug, LevelTrace, true},
+		{LevelDebug, LevelDebug, true},
+		{LevelInfo, LevelDebug, true},
+		{LevelDebug, LevelInfo, false},
+	}
+
+	for _, tt := range tests {
+		lm.SetLogLevel(tt.set)
+		if got := lm.IsLevelEnabled(tt.level); got != tt.expected {
+			t.Errorf("IsLevelEnabled(%s) at level %s: expected %v, got %v",
+				tt.level, tt.set, tt.expected, got)
+		}
+	}
+}
+
 func BenchmarkLogMonitorWrite(b *testing.B) {
 	// Test data of varying sizes
 	smallMsg := []byte("small message\n")
