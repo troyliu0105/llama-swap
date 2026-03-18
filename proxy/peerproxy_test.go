@@ -968,7 +968,7 @@ func TestProxyRequest_QueueFIFO_MultipleSlots(t *testing.T) {
 			w := httptest.NewRecorder()
 			pm.ProxyRequest("test-model", w, req)
 		}(i)
-		time.Sleep(2 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	wg.Wait()
