@@ -338,12 +338,18 @@ func (pp *peerProxyMember) processQueue() {
 
 				select {
 				case pp.sem <- struct{}{}:
+					// defer ensures semaphore is released even if ServeHTTP panics
+					semReleased := false
+					defer func() {
+						if !semReleased {
+							<-pp.sem
+						}
+					}()
 					ctx := qr.request.Context()
 					select {
 					case <-ctx.Done():
 						fmt.Printf("[PEER] peer=%s cancelled_while_waiting path=%s\n",
 							pp.peerID, qr.request.URL.Path)
-						<-pp.sem
 					default:
 						fmt.Printf("[PEER] peer=%s dequeued active=%d/%d queue=%d path=%s\n",
 							pp.peerID, len(pp.sem), pp.maxConcurrent, int(atomic.LoadInt32(&pp.waitingCount)), qr.request.URL.Path)
@@ -351,14 +357,11 @@ func (pp *peerProxyMember) processQueue() {
 							fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
 								pp.peerID, qr.request.URL.Path, err)
 							http.Error(qr.writer, err.Error(), http.StatusServiceUnavailable)
-							<-pp.sem
 						} else if qr.cancelled.Load() {
 							fmt.Printf("[PEER] peer=%s cancelled_before_serve path=%s\n",
 								pp.peerID, qr.request.URL.Path)
-							<-pp.sem
 						} else {
 							pp.reverseProxy.ServeHTTP(qr.writer, qr.request)
-							<-pp.sem
 						}
 					}
 				case <-time.After(pp.queueTimeout):
