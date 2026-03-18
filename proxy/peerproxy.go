@@ -50,7 +50,8 @@ type queuedRequest struct {
 	writer    http.ResponseWriter
 	request   *http.Request
 	done      chan struct{}
-	cancelled atomic.Bool // marks if request was cancelled while in queue
+	cancelled atomic.Bool
+	responded atomic.Bool
 }
 
 type PeerProxy struct {
@@ -338,13 +339,7 @@ func (pp *peerProxyMember) processQueue() {
 
 				select {
 				case pp.sem <- struct{}{}:
-					// defer ensures semaphore is released even if ServeHTTP panics
-					semReleased := false
-					defer func() {
-						if !semReleased {
-							<-pp.sem
-						}
-					}()
+					defer func() { <-pp.sem }()
 					ctx := qr.request.Context()
 					select {
 					case <-ctx.Done():
@@ -356,18 +351,23 @@ func (pp *peerProxyMember) processQueue() {
 						if err := pp.waitForRequestInterval(ctx, qr.request.URL.Path); err != nil {
 							fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
 								pp.peerID, qr.request.URL.Path, err)
-							http.Error(qr.writer, err.Error(), http.StatusServiceUnavailable)
+							if qr.responded.CompareAndSwap(false, true) {
+								http.Error(qr.writer, err.Error(), http.StatusServiceUnavailable)
+							}
 						} else if qr.cancelled.Load() {
 							fmt.Printf("[PEER] peer=%s cancelled_before_serve path=%s\n",
 								pp.peerID, qr.request.URL.Path)
 						} else {
+							qr.responded.Store(true)
 							pp.reverseProxy.ServeHTTP(qr.writer, qr.request)
 						}
 					}
 				case <-time.After(pp.queueTimeout):
 					fmt.Printf("[PEER ERROR] peer=%s queue_timeout waiting=%ds path=%s\n",
 						pp.peerID, int(pp.queueTimeout.Seconds()), qr.request.URL.Path)
-					http.Error(qr.writer, "request timed out waiting in queue", http.StatusServiceUnavailable)
+					if qr.responded.CompareAndSwap(false, true) {
+						http.Error(qr.writer, "request timed out waiting in queue", http.StatusServiceUnavailable)
+					}
 				case <-qr.request.Context().Done():
 					fmt.Printf("[PEER] peer=%s cancelled_in_queue path=%s\n",
 						pp.peerID, qr.request.URL.Path)
@@ -378,7 +378,9 @@ func (pp *peerProxyMember) processQueue() {
 			for len(pp.queue) > 0 {
 				req := <-pp.queue
 				atomic.AddInt32(&pp.waitingCount, -1)
-				http.Error(req.writer, "server shutting down", http.StatusServiceUnavailable)
+				if req.responded.CompareAndSwap(false, true) {
+					http.Error(req.writer, "server shutting down", http.StatusServiceUnavailable)
+				}
 				close(req.done)
 			}
 			return
@@ -396,15 +398,16 @@ func (pp *peerProxyMember) serveWithConcurrencyControl(writer http.ResponseWrite
 
 	select {
 	case pp.sem <- struct{}{}:
+		// Use defer to guarantee semaphore release even if ServeHTTP panics
+		// (e.g., http.ErrAbortHandler when client disconnects during streaming)
+		defer func() { <-pp.sem }()
 		if err := pp.waitForRequestInterval(request.Context(), request.URL.Path); err != nil {
 			fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
 				pp.peerID, request.URL.Path, err)
 			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
-			<-pp.sem
 			return serveHandled
 		}
 		pp.reverseProxy.ServeHTTP(writer, request)
-		<-pp.sem
 		return serveHandled
 	default:
 	}
@@ -433,7 +436,9 @@ func (pp *peerProxyMember) serveWithConcurrencyControl(writer http.ResponseWrite
 			fmt.Printf("[PEER] peer=%s client_disconnect_queued path=%s\n",
 				pp.peerID, request.URL.Path)
 			<-done
-			http.Error(writer, "client disconnected", 499)
+			if qr.responded.CompareAndSwap(false, true) {
+				http.Error(writer, "client disconnected", 499)
+			}
 			return serveHandled
 		}
 	default:
