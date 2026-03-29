@@ -20,6 +20,7 @@ type PeerConfig struct {
 	RequestInterval  time.Duration     `yaml:"requestInterval"`
 	StripV1Prefix    bool              `yaml:"stripV1Prefix"`
 	PrefixPeerModels *bool             `yaml:"prefixPeerModels"`
+	Timeout          time.Duration     `yaml:"timeout"`
 }
 
 func (c *PeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
@@ -33,6 +34,7 @@ func (c *PeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		MaxConcurrent: 0,
 		QueueSize:     32,
 		QueueTimeout:  60 * time.Second,
+		Timeout:       60 * time.Second,
 	}
 
 	if err := unmarshal(&defaults); err != nil {

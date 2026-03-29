@@ -477,6 +477,13 @@ peers:
     # - optional, default: 60s
     queueTimeout: 30s
 
+    # timeout: max time to wait for response headers from the peer
+    # - optional, default: 60s
+    # - controls how long to wait for the upstream server to return HTTP response headers
+    # - once headers are received, streaming responses continue indefinitely
+    # - increase this value for slow upstream servers or models that take longer to start responding
+    timeout: 120s
+
     # requestInterval: minimum time between request starts to this peer
     # - optional, default: 0 (disabled)
     # - useful for rate limiting to prevent 429 errors from upstream providers

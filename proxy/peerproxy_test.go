@@ -902,17 +902,12 @@ func TestPeerProxy_LogsTimeoutToStdout(t *testing.T) {
 			Proxy:    testServer.URL,
 			ProxyURL: proxyURL,
 			Models:   []string{"test-model"},
+			Timeout:  50 * time.Millisecond,
 		},
 	}
 
 	pm, err := NewPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
-
-	member := pm.proxyMap["test-model"]
-	transport := member.reverseProxy.Transport.(*http.Transport)
-	oldTimeout := transport.ResponseHeaderTimeout
-	transport.ResponseHeaderTimeout = 50 * time.Millisecond
-	defer func() { transport.ResponseHeaderTimeout = oldTimeout }()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 

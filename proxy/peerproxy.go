@@ -72,23 +72,27 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, prox
 	}
 	sort.Strings(peerIDs)
 
-	// Create a shared transport with reasonable timeouts for peer connections
-	// these can be tuned with feedback later
-	peerTransport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second, // Connection timeout
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second, // Time to wait for response headers
-		ExpectContinueTimeout: 1 * time.Second,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-	}
-
 	for _, peerID := range peerIDs {
 		peer := peers[peerID]
+
+		// Create per-peer transport with configurable timeout
+		peerTimeout := peer.Timeout
+		if peerTimeout <= 0 {
+			peerTimeout = 60 * time.Second
+		}
+		peerTransport := &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: peerTimeout,
+			ExpectContinueTimeout: 1 * time.Second,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       90 * time.Second,
+		}
+
 		// Create reverse proxy for this peer
 		reverseProxy := httputil.NewSingleHostReverseProxy(peer.ProxyURL)
 		reverseProxy.Transport = peerTransport

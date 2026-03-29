@@ -403,6 +403,11 @@
                         "default": "60s",
                         "description": "Maximum time to wait in queue before returning 503 Service Unavailable. Duration format: number followed by unit (s, m, h)."
                     },
+                    "timeout": {
+                        "type": "string",
+                        "default": "60s",
+                        "description": "Maximum time to wait for response headers from the peer. Once headers are received, streaming responses continue indefinitely. Increase for slow upstream servers. Duration format: number followed by unit (s, m, h)."
+                    },
                     "stripV1Prefix": {
                         "type": "boolean",
                         "default": false,

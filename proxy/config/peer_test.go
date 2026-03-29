@@ -218,6 +218,7 @@ headers:
 maxConcurrent: 5
 queueSize: 64
 queueTimeout: 30s
+timeout: 120s
 `
 	var config PeerConfig
 	err := yaml.Unmarshal([]byte(yamlData), &config)
@@ -242,6 +243,9 @@ queueTimeout: 30s
 	}
 	if config.QueueTimeout != 30*time.Second {
 		t.Errorf("expected QueueTimeout=30s, got %v", config.QueueTimeout)
+	}
+	if config.Timeout != 120*time.Second {
+		t.Errorf("expected Timeout=120s, got %v", config.Timeout)
 	}
 }
 
@@ -268,5 +272,8 @@ models:
 	}
 	if config.QueueTimeout != 60*time.Second {
 		t.Errorf("expected QueueTimeout=60s (default), got %v", config.QueueTimeout)
+	}
+	if config.Timeout != 60*time.Second {
+		t.Errorf("expected Timeout=60s (default), got %v", config.Timeout)
 	}
 }
