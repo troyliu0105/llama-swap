@@ -154,7 +154,7 @@ type Config struct {
 	RequiredAPIKeys []string `yaml:"apiKeys"`
 
 	// support remote peers, see issue #433, #296
-	Peers PeerDictionaryConfig `yaml:"peers"`
+	Peers PeerDictionaryExtConfig `yaml:"peers"`
 
 	// prefix peer model names with peer ID (e.g., "opencode/big-pickle")
 	PrefixPeerModels bool `yaml:"prefixPeerModels"`

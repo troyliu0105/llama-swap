@@ -412,6 +412,16 @@
                         "type": "boolean",
                         "default": false,
                         "description": "Remove /v1 prefix from request path before forwarding to peer. Useful for APIs that don't use /v1 prefix."
+                    },
+                    "requestInterval": {
+                        "type": "string",
+                        "default": "0",
+                        "description": "Minimum time between request starts to this peer. Useful for rate limiting to prevent 429 errors. Duration format: number followed by unit (e.g., 500ms, 1s). 0 means disabled."
+                    },
+                    "prefixPeerModels": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Prefix model names with peer ID (e.g., peer1/model-a). Useful to disambiguate models with the same name across different peers."
                     }
                 }
             },

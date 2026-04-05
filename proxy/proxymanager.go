@@ -89,7 +89,7 @@ type ProxyManager struct {
 	version   string
 
 	// peer proxy see: #296, #433
-	peerProxy *PeerProxy
+	peerProxy *EnhancedPeerProxy
 }
 
 func New(proxyConfig config.Config) *ProxyManager {
@@ -173,7 +173,7 @@ func New(proxyConfig config.Config) *ProxyManager {
 		maxMetrics = proxyConfig.MetricsMaxInMemory
 	}
 
-	peerProxy, err := NewPeerProxy(proxyConfig.Peers, proxyConfig.PrefixPeerModels, proxyLogger)
+	peerProxy, err := NewEnhancedPeerProxy(proxyConfig.Peers, proxyConfig.PrefixPeerModels, proxyLogger)
 	if err != nil {
 		proxyLogger.Errorf("Disabling Peering. Failed to create proxy peers: %v", err)
 		peerProxy = nil

@@ -498,3 +498,10 @@ peers:
     # - useful for APIs that don't use /v1 prefix (e.g., some provider-specific endpoints)
     # - example: /v1/chat/completions -> /chat/completions
     stripV1Prefix: false
+
+    # prefixPeerModels: prefix model names with peer ID
+    # - optional, default follows global prefixPeerModels setting
+    # - when true, models are accessible as peerID/modelName (e.g., openrouter/llama-3.1)
+    # - per-peer setting overrides the global prefixPeerModels config
+    # - useful to disambiguate models with the same name across different peers
+    prefixPeerModels: false

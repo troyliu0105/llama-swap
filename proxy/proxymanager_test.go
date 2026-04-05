@@ -227,7 +227,7 @@ func TestProxyManager_ListModelsHandler(t *testing.T) {
 			"model2": model2Config,
 			"model3": getTestSimpleResponderConfig("model3"),
 		},
-		Peers: map[string]config.PeerConfig{
+		Peers: map[string]config.ExtendedPeerConfig{
 			"peer1": {
 				Proxy:  "http://peer1:8080",
 				Models: []string{"peer-model-a", "peer-model-b"},
