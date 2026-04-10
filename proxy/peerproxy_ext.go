@@ -18,6 +18,44 @@ import (
 	"github.com/mostlygeek/llama-swap/proxy/config"
 )
 
+type peerCtxKey struct{}
+
+type peerRequestInfo struct {
+	model string
+	start time.Time
+}
+
+func getPeerModel(r *http.Request) string {
+	if info, ok := r.Context().Value(peerCtxKey{}).(*peerRequestInfo); ok {
+		return info.model
+	}
+	return "?"
+}
+
+func getPeerModelFromCtx(ctx context.Context) string {
+	if info, ok := ctx.Value(peerCtxKey{}).(*peerRequestInfo); ok {
+		return info.model
+	}
+	return "?"
+}
+
+func formatSize(bytes int) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%dB", bytes)
+	}
+	if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1fKB", float64(bytes)/1024)
+	}
+	return fmt.Sprintf("%.1fMB", float64(bytes)/(1024*1024))
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
+}
+
 // enhancedPeerMember holds the proxy configuration for a single peer
 type enhancedPeerMember struct {
 	peerID        string
@@ -25,7 +63,6 @@ type enhancedPeerMember struct {
 	apiKey        string
 	headers       map[string]string
 	stripV1Prefix bool
-	timeout       time.Duration
 	maxConcurrent int
 	queueSize     int
 	queueTimeout  time.Duration
@@ -92,7 +129,6 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			apiKey:          peer.ApiKey,
 			headers:         peer.Headers,
 			stripV1Prefix:   peer.StripV1Prefix,
-			timeout:         peer.Timeout,
 			maxConcurrent:   peer.MaxConcurrent,
 			queueSize:       peer.QueueSize,
 			queueTimeout:    peer.QueueTimeout,
@@ -100,19 +136,21 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			logger:          proxyLogger,
 		}
 
+		originalDirector := reverseProxy.Director
 		reverseProxy.Director = func(req *http.Request) {
-			req.URL.Scheme = peer.ProxyURL.Scheme
-			req.URL.Host = peer.ProxyURL.Host
+			originalDirector(req)
 			req.Host = req.URL.Host
 		}
 
 		reverseProxy.ModifyResponse = func(resp *http.Response) error {
 			contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 			isSSE := strings.Contains(contentType, "text/event-stream")
+			model := getPeerModel(resp.Request)
 
 			if isSSE {
 				resp.Header.Set("X-Accel-Buffering", "no")
 				pp.recordSuccess()
+				fmt.Printf("[PEER] ◀ %s | %d SSE | %s\n", model, resp.StatusCode, pp.peerID)
 				return nil
 			}
 
@@ -133,10 +171,17 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 					logBody = logBody[:512] + "..."
 				}
 				logBody = strings.ReplaceAll(logBody, "\n", " ")
-				fmt.Printf("[PEER ERROR] peer=%s status=%d method=%s path=%s error=%s\n",
-					pp.peerID, resp.StatusCode, resp.Request.Method, resp.Request.URL.Path, logBody)
+				fmt.Printf("[PEER ERROR] ◀ %s | %d | %s | %s\n",
+					model, resp.StatusCode, pp.peerID, logBody)
 			} else {
 				pp.recordSuccess()
+				if info, ok := resp.Request.Context().Value(peerCtxKey{}).(*peerRequestInfo); ok {
+					fmt.Printf("[PEER] ◀ %s | %d | %s | %s | %s\n",
+						model, resp.StatusCode, formatSize(len(body)), pp.peerID, formatDuration(time.Since(info.start)))
+				} else {
+					fmt.Printf("[PEER] ◀ %s | %d | %s | %s\n",
+						model, resp.StatusCode, formatSize(len(body)), pp.peerID)
+				}
 				if len(body) > 0 {
 					contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 					if strings.Contains(contentType, "application/json") {
@@ -146,7 +191,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 								logBody = logBody[:512] + "..."
 							}
 							logBody = strings.ReplaceAll(logBody, "\n", " ")
-							fmt.Printf("[PEER ERROR] peer=%s business_error=%s\n", pp.peerID, logBody)
+							fmt.Printf("[PEER ERROR] ◀ %s | business_error | %s | %s\n", model, pp.peerID, logBody)
 						}
 					}
 				}
@@ -168,9 +213,10 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 		}
 
 		reverseProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			model := getPeerModel(r)
+
 			if r.Context().Err() == context.Canceled {
-				fmt.Printf("[PEER] peer=%s client_disconnect_during_proxy path=%s\n",
-					pp.peerID, r.URL.Path)
+				fmt.Printf("[PEER] ◀ %s | CANCEL | %s\n", model, pp.peerID)
 				http.Error(w, "client disconnected", 499)
 				return
 			}
@@ -189,7 +235,8 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 				timeoutIndicator = "timeout "
 			}
 
-			fmt.Printf("[PEER ERROR] peer=%s %serror=%s\n", pp.peerID, timeoutIndicator, errStr)
+			fmt.Printf("[PEER ERROR] ◀ %s | CONN | %s | %serror=%s\n",
+				model, pp.peerID, timeoutIndicator, errStr)
 
 			errMsg := fmt.Sprintf("peer proxy error: %v", err)
 			if runtime.GOOS == "darwin" && strings.Contains(err.Error(), "connect: no route to host") {
@@ -269,20 +316,25 @@ func (p *EnhancedPeerProxy) GetOriginalModelName(modelID string) string {
 	return modelID
 }
 
-// ProxyRequest proxies a request to the appropriate peer server
 func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWriter, request *http.Request) error {
 	pp, found := p.proxyMap[modelID]
 	if !found {
 		return fmt.Errorf("no peer proxy found for model %s", modelID)
 	}
 
-	// Inject API key
+	fmt.Printf("[PEER] ▶ %s | %s %s | %s\n", modelID, request.Method, request.URL.Path, pp.peerID)
+
+	ctx := context.WithValue(request.Context(), peerCtxKey{}, &peerRequestInfo{
+		model: modelID,
+		start: time.Now(),
+	})
+	request = request.WithContext(ctx)
+
 	if pp.apiKey != "" {
 		request.Header.Set("Authorization", "Bearer "+pp.apiKey)
 		request.Header.Set("x-api-key", pp.apiKey)
 	}
 
-	// Inject custom headers
 	for key, value := range pp.headers {
 		if value == "" {
 			request.Header.Del(key)
@@ -291,7 +343,6 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 		}
 	}
 
-	// Strip /v1 prefix if configured
 	if pp.stripV1Prefix {
 		request.URL.Path = strings.TrimPrefix(request.URL.Path, "/v1")
 		if request.URL.Path == "" {
@@ -304,8 +355,8 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 	}
 
 	if err := pp.waitForRequestInterval(request.Context(), request.URL.Path); err != nil {
-		fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
-			pp.peerID, request.URL.Path, err)
+		fmt.Printf("[PEER ERROR] %s | rate_limit_cancelled | %s | %s\n",
+			modelID, request.URL.Path, err)
 		http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 		return nil
 	}
@@ -334,8 +385,8 @@ func (pp *enhancedPeerMember) recordFailure() {
 		pp.currentInterval = pp.requestInterval
 	}
 
-	fmt.Printf("[PEER BACKOFF] peer=%s interval=%dms max=%dms\n",
-		pp.peerID, pp.currentInterval.Milliseconds(), pp.requestInterval.Milliseconds())
+	fmt.Printf("[PEER BACKOFF] %s ↑ %s (cap %s)\n",
+		pp.peerID, formatDuration(pp.currentInterval), formatDuration(pp.requestInterval))
 }
 
 func (pp *enhancedPeerMember) recordSuccess() {
@@ -349,10 +400,10 @@ func (pp *enhancedPeerMember) recordSuccess() {
 	pp.currentInterval /= 2
 	if pp.currentInterval < pp.requestInterval/16 {
 		pp.currentInterval = 0
-		fmt.Printf("[PEER BACKOFF] peer=%s recovered interval=0ms\n", pp.peerID)
+		fmt.Printf("[PEER BACKOFF] %s ✓ recovered\n", pp.peerID)
 	} else {
-		fmt.Printf("[PEER BACKOFF] peer=%s recovering interval=%dms\n",
-			pp.peerID, pp.currentInterval.Milliseconds())
+		fmt.Printf("[PEER BACKOFF] %s ↓ %s\n",
+			pp.peerID, formatDuration(pp.currentInterval))
 	}
 }
 
@@ -371,8 +422,8 @@ func (pp *enhancedPeerMember) waitForRequestInterval(ctx context.Context, reques
 	pp.lastRequestMu.Unlock()
 
 	if waitTime > 0 {
-		fmt.Printf("[PEER] peer=%s rate_limit waiting=%dms path=%s\n",
-			pp.peerID, waitTime.Milliseconds(), requestPath)
+		fmt.Printf("[PEER] %s | wait %s | %s\n",
+			getPeerModelFromCtx(ctx), formatDuration(waitTime), pp.peerID)
 		select {
 		case <-time.After(waitTime):
 			return nil
@@ -421,8 +472,8 @@ func (pp *enhancedPeerMember) processQueue() {
 
 				// Wait for request interval BEFORE acquiring semaphore
 				if err := pp.waitForRequestInterval(qr.request.Context(), qr.request.URL.Path); err != nil {
-					fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
-						pp.peerID, qr.request.URL.Path, err)
+					fmt.Printf("[PEER ERROR] %s | rate_limit_cancelled | %s\n",
+						getPeerModel(qr.request), err)
 					if qr.responded.CompareAndSwap(false, true) {
 						http.Error(qr.writer, err.Error(), http.StatusServiceUnavailable)
 					}
@@ -436,14 +487,14 @@ func (pp *enhancedPeerMember) processQueue() {
 					ctx := qr.request.Context()
 					select {
 					case <-ctx.Done():
-						fmt.Printf("[PEER] peer=%s cancelled_while_waiting path=%s\n",
-							pp.peerID, qr.request.URL.Path)
+						fmt.Printf("[PEER] %s | cancelled | %s\n",
+							getPeerModel(qr.request), pp.peerID)
 					default:
-						fmt.Printf("[PEER] peer=%s dequeued active=%d/%d queue=%d path=%s\n",
-							pp.peerID, len(pp.sem), pp.maxConcurrent, int(atomic.LoadInt32(&pp.waitingCount)), qr.request.URL.Path)
+						fmt.Printf("[PEER] %s | dequeue | %d/%d slots | %s\n",
+							getPeerModel(qr.request), len(pp.sem), pp.maxConcurrent, pp.peerID)
 						if qr.cancelled.Load() {
-							fmt.Printf("[PEER] peer=%s cancelled_before_serve path=%s\n",
-								pp.peerID, qr.request.URL.Path)
+							fmt.Printf("[PEER] %s | cancelled_before_serve | %s\n",
+								getPeerModel(qr.request), pp.peerID)
 						} else {
 							qr.responded.Store(true)
 							pp.reverseProxy.ServeHTTP(qr.writer, qr.request)
@@ -451,14 +502,14 @@ func (pp *enhancedPeerMember) processQueue() {
 						}
 					}
 				case <-time.After(pp.queueTimeout):
-					fmt.Printf("[PEER ERROR] peer=%s queue_timeout waiting=%ds path=%s\n",
-						pp.peerID, int(pp.queueTimeout.Seconds()), qr.request.URL.Path)
+					fmt.Printf("[PEER ERROR] %s | queue_timeout | %s\n",
+						getPeerModel(qr.request), pp.peerID)
 					if qr.responded.CompareAndSwap(false, true) {
 						http.Error(qr.writer, "request timed out waiting in queue", http.StatusServiceUnavailable)
 					}
 				case <-qr.request.Context().Done():
-					fmt.Printf("[PEER] peer=%s cancelled_in_queue path=%s\n",
-						pp.peerID, qr.request.URL.Path)
+					fmt.Printf("[PEER] %s | cancelled_in_queue | %s\n",
+						getPeerModel(qr.request), pp.peerID)
 				}
 				close(qr.done)
 			}(req)
@@ -482,13 +533,12 @@ func (pp *enhancedPeerMember) serveWithConcurrencyControl(writer http.ResponseWr
 		return serveContinue
 	}
 
-	fmt.Printf("[PEER] peer=%s recv active=%d/%d queue=%d/%d path=%s\n",
-		pp.peerID, len(pp.sem), pp.maxConcurrent, int(atomic.LoadInt32(&pp.waitingCount)), pp.queueSize, request.URL.Path)
+	fmt.Printf("[PEER] %s | %d/%d slots | %s\n",
+		getPeerModel(request), len(pp.sem), pp.maxConcurrent, pp.peerID)
 
-	// Wait for request interval BEFORE acquiring semaphore, so the wait doesn't block other requests
 	if err := pp.waitForRequestInterval(request.Context(), request.URL.Path); err != nil {
-		fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
-			pp.peerID, request.URL.Path, err)
+		fmt.Printf("[PEER ERROR] %s | rate_limit_cancelled | %s\n",
+			getPeerModel(request), err)
 		http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 		return serveHandled
 	}
@@ -525,8 +575,8 @@ func (pp *enhancedPeerMember) serveWithConcurrencyControl(writer http.ResponseWr
 			return serveHandled
 		case <-request.Context().Done():
 			qr.cancelled.Store(true)
-			fmt.Printf("[PEER] peer=%s client_disconnect_queued path=%s\n",
-				pp.peerID, request.URL.Path)
+			fmt.Printf("[PEER] %s | disconnect_queued | %s\n",
+				getPeerModel(request), pp.peerID)
 			<-done
 			if qr.responded.CompareAndSwap(false, true) {
 				http.Error(writer, "client disconnected", 499)
