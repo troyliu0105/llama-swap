@@ -306,6 +306,7 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 		return nil
 	}
 	pp.reverseProxy.ServeHTTP(writer, request)
+	pp.markRequestComplete()
 	return nil
 }
 
@@ -316,14 +317,10 @@ func (pp *enhancedPeerMember) waitForRequestInterval(ctx context.Context, reques
 	}
 
 	pp.lastRequestMu.Lock()
-	now := time.Now()
-	elapsed := now.Sub(pp.lastRequestTime)
+	elapsed := time.Since(pp.lastRequestTime)
 	var waitTime time.Duration
 	if elapsed < pp.requestInterval {
 		waitTime = pp.requestInterval - elapsed
-		pp.lastRequestTime = now.Add(waitTime)
-	} else {
-		pp.lastRequestTime = now
 	}
 	pp.lastRequestMu.Unlock()
 
@@ -338,6 +335,12 @@ func (pp *enhancedPeerMember) waitForRequestInterval(ctx context.Context, reques
 		}
 	}
 	return nil
+}
+
+func (pp *enhancedPeerMember) markRequestComplete() {
+	pp.lastRequestMu.Lock()
+	pp.lastRequestTime = time.Now()
+	pp.lastRequestMu.Unlock()
 }
 
 // processQueue processes queued requests in a goroutine
@@ -370,6 +373,17 @@ func (pp *enhancedPeerMember) processQueue() {
 					return
 				}
 
+				// Wait for request interval BEFORE acquiring semaphore
+				if err := pp.waitForRequestInterval(qr.request.Context(), qr.request.URL.Path); err != nil {
+					fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
+						pp.peerID, qr.request.URL.Path, err)
+					if qr.responded.CompareAndSwap(false, true) {
+						http.Error(qr.writer, err.Error(), http.StatusServiceUnavailable)
+					}
+					close(qr.done)
+					return
+				}
+
 				select {
 				case pp.sem <- struct{}{}:
 					defer func() { <-pp.sem }()
@@ -381,18 +395,13 @@ func (pp *enhancedPeerMember) processQueue() {
 					default:
 						fmt.Printf("[PEER] peer=%s dequeued active=%d/%d queue=%d path=%s\n",
 							pp.peerID, len(pp.sem), pp.maxConcurrent, int(atomic.LoadInt32(&pp.waitingCount)), qr.request.URL.Path)
-						if err := pp.waitForRequestInterval(ctx, qr.request.URL.Path); err != nil {
-							fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
-								pp.peerID, qr.request.URL.Path, err)
-							if qr.responded.CompareAndSwap(false, true) {
-								http.Error(qr.writer, err.Error(), http.StatusServiceUnavailable)
-							}
-						} else if qr.cancelled.Load() {
+						if qr.cancelled.Load() {
 							fmt.Printf("[PEER] peer=%s cancelled_before_serve path=%s\n",
 								pp.peerID, qr.request.URL.Path)
 						} else {
 							qr.responded.Store(true)
 							pp.reverseProxy.ServeHTTP(qr.writer, qr.request)
+							pp.markRequestComplete()
 						}
 					}
 				case <-time.After(pp.queueTimeout):
@@ -430,18 +439,21 @@ func (pp *enhancedPeerMember) serveWithConcurrencyControl(writer http.ResponseWr
 	fmt.Printf("[PEER] peer=%s recv active=%d/%d queue=%d/%d path=%s\n",
 		pp.peerID, len(pp.sem), pp.maxConcurrent, int(atomic.LoadInt32(&pp.waitingCount)), pp.queueSize, request.URL.Path)
 
+	// Wait for request interval BEFORE acquiring semaphore, so the wait doesn't block other requests
+	if err := pp.waitForRequestInterval(request.Context(), request.URL.Path); err != nil {
+		fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
+			pp.peerID, request.URL.Path, err)
+		http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+		return serveHandled
+	}
+
 	select {
 	case pp.sem <- struct{}{}:
 		// Use defer to guarantee semaphore release even if ServeHTTP panics
 		// (e.g., http.ErrAbortHandler when client disconnects during streaming)
 		defer func() { <-pp.sem }()
-		if err := pp.waitForRequestInterval(request.Context(), request.URL.Path); err != nil {
-			fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
-				pp.peerID, request.URL.Path, err)
-			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
-			return serveHandled
-		}
 		pp.reverseProxy.ServeHTTP(writer, request)
+		pp.markRequestComplete()
 		return serveHandled
 	default:
 	}
