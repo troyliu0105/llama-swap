@@ -213,10 +213,95 @@ func TestEnhancedPeerProxy_ConcurrencyControl(t *testing.T) {
 }
 
 func TestEnhancedPeerProxy_RequestInterval(t *testing.T) {
+	failCount := int32(0)
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&failCount, 1) <= 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryExtConfig{
+		"peer1": config.ExtendedPeerConfig{
+			Proxy:           testServer.URL,
+			ProxyURL:        proxyURL,
+			Models:          []string{"test-model"},
+			RequestInterval: 400 * time.Millisecond,
+		},
+	}
+
+	pm, err := NewEnhancedPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	// First request: no failure yet, should be instant
+	req1 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w1 := httptest.NewRecorder()
+	start := time.Now()
+	err = pm.ProxyRequest("test-model", w1, req1)
+	require.NoError(t, err)
+	firstReqTime := time.Since(start)
+	assert.Less(t, firstReqTime, 50*time.Millisecond, "first request should have no delay")
+
+	// Second request: after first failure (503), backoff kicks in
+	req2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w2 := httptest.NewRecorder()
+	start = time.Now()
+	err = pm.ProxyRequest("test-model", w2, req2)
+	require.NoError(t, err)
+	secondReqTime := time.Since(start)
+	assert.GreaterOrEqual(t, secondReqTime, 40*time.Millisecond,
+		"second request should wait for backoff interval (requestInterval/8 = 50ms)")
+
+	// Third request: backoff doubled
+	req3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w3 := httptest.NewRecorder()
+	start = time.Now()
+	err = pm.ProxyRequest("test-model", w3, req3)
+	require.NoError(t, err)
+	thirdReqTime := time.Since(start)
+	assert.GreaterOrEqual(t, thirdReqTime, 80*time.Millisecond,
+		"third request should wait for doubled backoff")
+
+	// Fourth request: succeeds, backoff starts decaying
+	req4 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w4 := httptest.NewRecorder()
+	start = time.Now()
+	err = pm.ProxyRequest("test-model", w4, req4)
+	require.NoError(t, err)
+	fourthReqTime := time.Since(start)
+	assert.GreaterOrEqual(t, fourthReqTime, 80*time.Millisecond,
+		"fourth request should wait for decayed interval")
+
+	// Fifth request: succeeds again, interval shrinks further
+	req5 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w5 := httptest.NewRecorder()
+	start = time.Now()
+	err = pm.ProxyRequest("test-model", w5, req5)
+	require.NoError(t, err)
+	fifthReqTime := time.Since(start)
+	assert.GreaterOrEqual(t, fifthReqTime, 30*time.Millisecond,
+		"fifth request should wait for further decayed interval")
+
+	// Sixth request: currentInterval=25ms, small wait. After this success: 25/2=12ms < 25ms threshold → resets to 0
+	req6 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w6 := httptest.NewRecorder()
+	start = time.Now()
+	err = pm.ProxyRequest("test-model", w6, req6)
+	require.NoError(t, err)
+	sixthReqTime := time.Since(start)
+	assert.Less(t, sixthReqTime, 100*time.Millisecond,
+		"sixth request should have no backoff delay (only HTTP round-trip time)")
+}
+
+func TestEnhancedPeerProxy_BackoffOnConnectionError(t *testing.T) {
+	// Server that immediately rejects connections
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	testServer.Close() // close immediately so connections fail
 
 	proxyURL, _ := url.Parse(testServer.URL)
 	peers := config.PeerDictionaryExtConfig{
@@ -231,22 +316,54 @@ func TestEnhancedPeerProxy_RequestInterval(t *testing.T) {
 	pm, err := NewEnhancedPeerProxy(peers, false, testLogger)
 	require.NoError(t, err)
 
+	// First request: fails with connection error, backoff starts at requestInterval/8 = 25ms
 	req1 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	w1 := httptest.NewRecorder()
-	start := time.Now()
 	err = pm.ProxyRequest("test-model", w1, req1)
 	require.NoError(t, err)
-	firstReqTime := time.Since(start)
+	assert.Equal(t, http.StatusBadGateway, w1.Code)
 
+	// Second request: should wait for backoff
 	req2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	w2 := httptest.NewRecorder()
-	start = time.Now()
-	err = pm.ProxyRequest("test-model", w2, req2)
-	require.NoError(t, err)
-	secondReqTime := time.Since(start)
+	start := time.Now()
+	pm.ProxyRequest("test-model", w2, req2)
+	assert.GreaterOrEqual(t, time.Since(start), 20*time.Millisecond,
+		"should wait for backoff after connection error")
+}
 
-	assert.Less(t, firstReqTime, 50*time.Millisecond)
-	assert.GreaterOrEqual(t, secondReqTime, 180*time.Millisecond)
+func TestEnhancedPeerProxy_NoBackoffWithoutRequestInterval(t *testing.T) {
+	failCount := int32(0)
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&failCount, 1) <= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryExtConfig{
+		"peer1": config.ExtendedPeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			Models:   []string{"test-model"},
+			// No RequestInterval set
+		},
+	}
+
+	pm, err := NewEnhancedPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	for i := 0; i < 4; i++ {
+		req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		w := httptest.NewRecorder()
+		start := time.Now()
+		pm.ProxyRequest("test-model", w, req)
+		assert.Less(t, time.Since(start), 20*time.Millisecond,
+			"request %d should have no delay when requestInterval is not set", i+1)
+	}
 }
 
 func TestEnhancedPeerProxy_QueueFull(t *testing.T) {

@@ -38,6 +38,10 @@ type enhancedPeerMember struct {
 	lastRequestMu   sync.Mutex
 	lastRequestTime time.Time
 	requestInterval time.Duration
+	// currentInterval tracks the adaptive backoff interval.
+	// On failure it grows exponentially (capped at requestInterval).
+	// On success it decays back toward 0.
+	currentInterval time.Duration
 }
 
 // EnhancedPeerProxy manages proxying requests to remote peer servers with extended features
@@ -63,7 +67,6 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 	for _, peerID := range peerIDs {
 		peer := peers[peerID]
 
-		// Create per-peer transport with configurable timeout
 		peerTimeout := peer.Timeout
 		if peerTimeout <= 0 {
 			peerTimeout = 60 * time.Second
@@ -81,109 +84,11 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			IdleConnTimeout:       90 * time.Second,
 		}
 
-		// Create reverse proxy for this peer
 		reverseProxy := httputil.NewSingleHostReverseProxy(peer.ProxyURL)
 		reverseProxy.Transport = peerTransport
 
-		currentPeerID := peerID // capture for closure
-		// Director: set Host header for remote hosts
-		reverseProxy.Director = func(req *http.Request) {
-			req.URL.Scheme = peer.ProxyURL.Scheme
-			req.URL.Host = peer.ProxyURL.Host
-			req.Host = req.URL.Host
-		}
-
-		reverseProxy.ModifyResponse = func(resp *http.Response) error {
-			contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-			isSSE := strings.Contains(contentType, "text/event-stream")
-
-			// SSE response: set header and return immediately to preserve streaming
-			if isSSE {
-				resp.Header.Set("X-Accel-Buffering", "no")
-				return nil
-			}
-
-			// Non-SSE response: read body for error logging
-			var body []byte
-			var readErr error
-			if resp.Body != nil {
-				body, readErr = io.ReadAll(resp.Body)
-				if readErr == nil {
-					resp.Body.Close()
-					resp.Body = io.NopCloser(bytes.NewReader(body))
-				}
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				logBody := string(body)
-				if len(logBody) > 512 {
-					logBody = logBody[:512] + "..."
-				}
-				logBody = strings.ReplaceAll(logBody, "\n", " ")
-				fmt.Printf("[PEER ERROR] peer=%s status=%d method=%s path=%s error=%s\n",
-					currentPeerID, resp.StatusCode, resp.Request.Method, resp.Request.URL.Path, logBody)
-			} else if resp.StatusCode == http.StatusOK && len(body) > 0 {
-				contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-				if strings.Contains(contentType, "application/json") {
-					if bytes.Contains(body, []byte("\"error\"")) {
-						logBody := string(body)
-						if len(logBody) > 512 {
-							logBody = logBody[:512] + "..."
-						}
-						logBody = strings.ReplaceAll(logBody, "\n", " ")
-						fmt.Printf("[PEER ERROR] peer=%s business_error=%s\n", currentPeerID, logBody)
-					}
-				}
-			}
-
-			if proxyLogger.IsLevelEnabled(LevelTrace) && readErr == nil {
-				contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-				if strings.Contains(contentType, "application/json") || strings.Contains(contentType, "text/") {
-					logBody := string(body)
-					if len(logBody) > 1024 {
-						logBody = logBody[:1024] + "... (truncated)"
-					}
-					proxyLogger.Tracef("Peer %s response body: %s", currentPeerID, logBody)
-				} else {
-					proxyLogger.Tracef("Peer %s response body: [binary data, type=%s, size=%d]", currentPeerID, contentType, len(body))
-				}
-			}
-			return nil
-		}
-
-		reverseProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			// Check if client disconnected first
-			if r.Context().Err() == context.Canceled {
-				fmt.Printf("[PEER] peer=%s client_disconnect_during_proxy path=%s\n",
-					peerID, r.URL.Path)
-				http.Error(w, "client disconnected", 499)
-				return
-			}
-
-			proxyLogger.Warnf("peer %s: proxy error: %v", peerID, err)
-
-			errStr := err.Error()
-			timeoutIndicator := ""
-			lowerErr := strings.ToLower(errStr)
-			if strings.Contains(lowerErr, "timeout") ||
-				strings.Contains(lowerErr, "deadline exceeded") ||
-				strings.Contains(lowerErr, "context deadline") ||
-				strings.Contains(lowerErr, "read timed out") {
-				timeoutIndicator = "timeout "
-			}
-
-			fmt.Printf("[PEER ERROR] peer=%s %serror=%s\n", peerID, timeoutIndicator, errStr)
-
-			errMsg := fmt.Sprintf("peer proxy error: %v", err)
-			if runtime.GOOS == "darwin" && strings.Contains(err.Error(), "connect: no route to host") {
-				errMsg += " (hint: on macOS, check System Settings > Privacy & Security > Local Network permissions)"
-			}
-			http.Error(w, errMsg, http.StatusBadGateway)
-		}
-
 		pp := &enhancedPeerMember{
 			peerID:          peerID,
-			reverseProxy:    reverseProxy,
 			apiKey:          peer.ApiKey,
 			headers:         peer.Headers,
 			stripV1Prefix:   peer.StripV1Prefix,
@@ -195,6 +100,106 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			logger:          proxyLogger,
 		}
 
+		reverseProxy.Director = func(req *http.Request) {
+			req.URL.Scheme = peer.ProxyURL.Scheme
+			req.URL.Host = peer.ProxyURL.Host
+			req.Host = req.URL.Host
+		}
+
+		reverseProxy.ModifyResponse = func(resp *http.Response) error {
+			contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+			isSSE := strings.Contains(contentType, "text/event-stream")
+
+			if isSSE {
+				resp.Header.Set("X-Accel-Buffering", "no")
+				pp.recordSuccess()
+				return nil
+			}
+
+			var body []byte
+			var readErr error
+			if resp.Body != nil {
+				body, readErr = io.ReadAll(resp.Body)
+				if readErr == nil {
+					resp.Body.Close()
+					resp.Body = io.NopCloser(bytes.NewReader(body))
+				}
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				pp.recordFailure()
+				logBody := string(body)
+				if len(logBody) > 512 {
+					logBody = logBody[:512] + "..."
+				}
+				logBody = strings.ReplaceAll(logBody, "\n", " ")
+				fmt.Printf("[PEER ERROR] peer=%s status=%d method=%s path=%s error=%s\n",
+					pp.peerID, resp.StatusCode, resp.Request.Method, resp.Request.URL.Path, logBody)
+			} else {
+				pp.recordSuccess()
+				if len(body) > 0 {
+					contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+					if strings.Contains(contentType, "application/json") {
+						if bytes.Contains(body, []byte("\"error\"")) {
+							logBody := string(body)
+							if len(logBody) > 512 {
+								logBody = logBody[:512] + "..."
+							}
+							logBody = strings.ReplaceAll(logBody, "\n", " ")
+							fmt.Printf("[PEER ERROR] peer=%s business_error=%s\n", pp.peerID, logBody)
+						}
+					}
+				}
+			}
+
+			if proxyLogger.IsLevelEnabled(LevelTrace) && readErr == nil {
+				contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+				if strings.Contains(contentType, "application/json") || strings.Contains(contentType, "text/") {
+					logBody := string(body)
+					if len(logBody) > 1024 {
+						logBody = logBody[:1024] + "... (truncated)"
+					}
+					proxyLogger.Tracef("Peer %s response body: %s", pp.peerID, logBody)
+				} else {
+					proxyLogger.Tracef("Peer %s response body: [binary data, type=%s, size=%d]", pp.peerID, contentType, len(body))
+				}
+			}
+			return nil
+		}
+
+		reverseProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			if r.Context().Err() == context.Canceled {
+				fmt.Printf("[PEER] peer=%s client_disconnect_during_proxy path=%s\n",
+					pp.peerID, r.URL.Path)
+				http.Error(w, "client disconnected", 499)
+				return
+			}
+
+			pp.recordFailure()
+
+			proxyLogger.Warnf("peer %s: proxy error: %v", pp.peerID, err)
+
+			errStr := err.Error()
+			timeoutIndicator := ""
+			lowerErr := strings.ToLower(errStr)
+			if strings.Contains(lowerErr, "timeout") ||
+				strings.Contains(lowerErr, "deadline exceeded") ||
+				strings.Contains(lowerErr, "context deadline") ||
+				strings.Contains(lowerErr, "read timed out") {
+				timeoutIndicator = "timeout "
+			}
+
+			fmt.Printf("[PEER ERROR] peer=%s %serror=%s\n", pp.peerID, timeoutIndicator, errStr)
+
+			errMsg := fmt.Sprintf("peer proxy error: %v", err)
+			if runtime.GOOS == "darwin" && strings.Contains(err.Error(), "connect: no route to host") {
+				errMsg += " (hint: on macOS, check System Settings > Privacy & Security > Local Network permissions)"
+			}
+			http.Error(w, errMsg, http.StatusBadGateway)
+		}
+
+		pp.reverseProxy = reverseProxy
+
 		if peer.MaxConcurrent > 0 {
 			pp.sem = make(chan struct{}, peer.MaxConcurrent)
 			pp.queue = make(chan *queuedRequest, peer.QueueSize)
@@ -202,7 +207,6 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			go pp.processQueue()
 		}
 
-		// Map each model to this peer's proxy
 		peerPrefix := prefixPeerModels
 		if peer.PrefixPeerModels != nil {
 			peerPrefix = *peer.PrefixPeerModels
@@ -310,17 +314,59 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 	return nil
 }
 
-// waitForRequestInterval implements rate limiting between requests
+func (pp *enhancedPeerMember) recordFailure() {
+	pp.lastRequestMu.Lock()
+	defer pp.lastRequestMu.Unlock()
+
+	if pp.requestInterval <= 0 {
+		return
+	}
+
+	if pp.currentInterval == 0 {
+		pp.currentInterval = pp.requestInterval / 8
+		if pp.currentInterval == 0 {
+			pp.currentInterval = time.Millisecond
+		}
+	} else {
+		pp.currentInterval *= 2
+	}
+	if pp.currentInterval > pp.requestInterval {
+		pp.currentInterval = pp.requestInterval
+	}
+
+	fmt.Printf("[PEER BACKOFF] peer=%s interval=%dms max=%dms\n",
+		pp.peerID, pp.currentInterval.Milliseconds(), pp.requestInterval.Milliseconds())
+}
+
+func (pp *enhancedPeerMember) recordSuccess() {
+	pp.lastRequestMu.Lock()
+	defer pp.lastRequestMu.Unlock()
+
+	if pp.currentInterval == 0 {
+		return
+	}
+
+	pp.currentInterval /= 2
+	if pp.currentInterval < pp.requestInterval/16 {
+		pp.currentInterval = 0
+		fmt.Printf("[PEER BACKOFF] peer=%s recovered interval=0ms\n", pp.peerID)
+	} else {
+		fmt.Printf("[PEER BACKOFF] peer=%s recovering interval=%dms\n",
+			pp.peerID, pp.currentInterval.Milliseconds())
+	}
+}
+
 func (pp *enhancedPeerMember) waitForRequestInterval(ctx context.Context, requestPath string) error {
 	if pp.requestInterval <= 0 {
 		return nil
 	}
 
 	pp.lastRequestMu.Lock()
+	effectiveInterval := pp.currentInterval
 	elapsed := time.Since(pp.lastRequestTime)
 	var waitTime time.Duration
-	if elapsed < pp.requestInterval {
-		waitTime = pp.requestInterval - elapsed
+	if effectiveInterval > 0 && elapsed < effectiveInterval {
+		waitTime = effectiveInterval - elapsed
 	}
 	pp.lastRequestMu.Unlock()
 
