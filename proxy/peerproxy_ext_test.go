@@ -265,15 +265,15 @@ func TestEnhancedPeerProxy_RequestInterval(t *testing.T) {
 	assert.GreaterOrEqual(t, thirdReqTime, 80*time.Millisecond,
 		"third request should wait for doubled backoff")
 
-	// Fourth request: succeeds, backoff starts decaying
+	// Fourth request: succeeds, backoff starts decaying slowly (/1.15)
 	req4 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	w4 := httptest.NewRecorder()
 	start = time.Now()
 	err = pm.ProxyRequest("test-model", w4, req4)
 	require.NoError(t, err)
 	fourthReqTime := time.Since(start)
-	assert.GreaterOrEqual(t, fourthReqTime, 80*time.Millisecond,
-		"fourth request should wait for decayed interval")
+	assert.GreaterOrEqual(t, fourthReqTime, 150*time.Millisecond,
+		"fourth request should wait for decayed interval (200/1.15 ≈ 173ms)")
 
 	// Fifth request: succeeds again, interval shrinks further
 	req5 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -282,18 +282,20 @@ func TestEnhancedPeerProxy_RequestInterval(t *testing.T) {
 	err = pm.ProxyRequest("test-model", w5, req5)
 	require.NoError(t, err)
 	fifthReqTime := time.Since(start)
-	assert.GreaterOrEqual(t, fifthReqTime, 30*time.Millisecond,
-		"fifth request should wait for further decayed interval")
+	assert.GreaterOrEqual(t, fifthReqTime, 130*time.Millisecond,
+		"fifth request should wait for further decayed interval (173/1.15 ≈ 151ms)")
 
-	// Sixth request: currentInterval=25ms, small wait. After this success: 25/2=12ms < 25ms threshold → resets to 0
+	// Sixth request: still in backoff with slow decay, interval ≈ 131ms
 	req6 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	w6 := httptest.NewRecorder()
 	start = time.Now()
 	err = pm.ProxyRequest("test-model", w6, req6)
 	require.NoError(t, err)
 	sixthReqTime := time.Since(start)
-	assert.Less(t, sixthReqTime, 100*time.Millisecond,
-		"sixth request should have no backoff delay (only HTTP round-trip time)")
+	assert.GreaterOrEqual(t, sixthReqTime, 110*time.Millisecond,
+		"sixth request should wait for decayed interval (151/1.15 ≈ 131ms)")
+	assert.Less(t, sixthReqTime, 200*time.Millisecond,
+		"sixth request wait should be less than the fourth request wait")
 }
 
 func TestEnhancedPeerProxy_BackoffOnConnectionError(t *testing.T) {

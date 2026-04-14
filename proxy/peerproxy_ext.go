@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net"
@@ -20,9 +21,39 @@ import (
 
 type peerCtxKey struct{}
 
+func peerLog(format string, args ...any) {
+	ts := time.Now().Format("15:04:05.000")
+	fmt.Printf("[%s] "+format, append([]any{ts}, args...)...)
+}
+
 type peerRequestInfo struct {
 	model string
+	reqID string
 	start time.Time
+}
+
+func generateReqID() string {
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 4)
+	rand.Read(b)
+	for i := range b {
+		b[i] = charset[int(b[i])%len(charset)]
+	}
+	return string(b)
+}
+
+func getPeerReqID(r *http.Request) string {
+	if info, ok := r.Context().Value(peerCtxKey{}).(*peerRequestInfo); ok {
+		return info.reqID
+	}
+	return "????"
+}
+
+func getPeerReqIDFromCtx(ctx context.Context) string {
+	if info, ok := ctx.Value(peerCtxKey{}).(*peerRequestInfo); ok {
+		return info.reqID
+	}
+	return "????"
 }
 
 func getPeerModel(r *http.Request) string {
@@ -72,6 +103,7 @@ type enhancedPeerMember struct {
 	logger        *LogMonitor
 	stopCh        chan struct{}
 
+	backoffMu       sync.Mutex
 	lastRequestMu   sync.Mutex
 	lastRequestTime time.Time
 	requestInterval time.Duration
@@ -149,8 +181,12 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 
 			if isSSE {
 				resp.Header.Set("X-Accel-Buffering", "no")
-				pp.recordSuccess()
-				fmt.Printf("[PEER] ◀ %s | %d SSE | %s\n", model, resp.StatusCode, pp.peerID)
+				if resp.StatusCode >= 400 {
+					pp.recordFailure()
+				} else {
+					pp.recordSuccess()
+				}
+				peerLog("[PEER] ◀ %s | %s | %d SSE | %s\n", getPeerReqID(resp.Request), model, resp.StatusCode, pp.peerID)
 				return nil
 			}
 
@@ -171,15 +207,15 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 					logBody = logBody[:512] + "..."
 				}
 				logBody = strings.ReplaceAll(logBody, "\n", " ")
-				fmt.Printf("[PEER ERROR] ◀ %s | %d | %s | %s\n",
-					model, resp.StatusCode, pp.peerID, logBody)
+				peerLog("[PEER ERROR] ◀ %s | %s | %d | %s | %s\n",
+					getPeerReqID(resp.Request), model, resp.StatusCode, pp.peerID, logBody)
 			} else {
 				pp.recordSuccess()
 				if info, ok := resp.Request.Context().Value(peerCtxKey{}).(*peerRequestInfo); ok {
-					fmt.Printf("[PEER] ◀ %s | %d | %s | %s | %s\n",
-						model, resp.StatusCode, formatSize(len(body)), pp.peerID, formatDuration(time.Since(info.start)))
+					peerLog("[PEER] ◀ %s | %s | %d | %s | %s | %s\n",
+						info.reqID, model, resp.StatusCode, formatSize(len(body)), pp.peerID, formatDuration(time.Since(info.start)))
 				} else {
-					fmt.Printf("[PEER] ◀ %s | %d | %s | %s\n",
+					peerLog("[PEER] ◀ %s | %d | %s | %s\n",
 						model, resp.StatusCode, formatSize(len(body)), pp.peerID)
 				}
 				if len(body) > 0 {
@@ -191,7 +227,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 								logBody = logBody[:512] + "..."
 							}
 							logBody = strings.ReplaceAll(logBody, "\n", " ")
-							fmt.Printf("[PEER ERROR] ◀ %s | business_error | %s | %s\n", model, pp.peerID, logBody)
+							peerLog("[PEER ERROR] ◀ %s | %s | business_error | %s | %s\n", getPeerReqID(resp.Request), model, pp.peerID, logBody)
 						}
 					}
 				}
@@ -216,7 +252,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			model := getPeerModel(r)
 
 			if r.Context().Err() == context.Canceled {
-				fmt.Printf("[PEER] ◀ %s | CANCEL | %s\n", model, pp.peerID)
+				peerLog("[PEER] ◀ %s | %s | CANCEL | %s\n", getPeerReqID(r), model, pp.peerID)
 				http.Error(w, "client disconnected", 499)
 				return
 			}
@@ -235,8 +271,8 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 				timeoutIndicator = "timeout "
 			}
 
-			fmt.Printf("[PEER ERROR] ◀ %s | CONN | %s | %serror=%s\n",
-				model, pp.peerID, timeoutIndicator, errStr)
+			peerLog("[PEER ERROR] ◀ %s | %s | CONN | %s | %serror=%s\n",
+				getPeerReqID(r), model, pp.peerID, timeoutIndicator, errStr)
 
 			errMsg := fmt.Sprintf("peer proxy error: %v", err)
 			if runtime.GOOS == "darwin" && strings.Contains(err.Error(), "connect: no route to host") {
@@ -322,13 +358,14 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 		return fmt.Errorf("no peer proxy found for model %s", modelID)
 	}
 
-	fmt.Printf("[PEER] ▶ %s | %s %s | %s\n", modelID, request.Method, request.URL.Path, pp.peerID)
-
 	ctx := context.WithValue(request.Context(), peerCtxKey{}, &peerRequestInfo{
 		model: modelID,
+		reqID: generateReqID(),
 		start: time.Now(),
 	})
 	request = request.WithContext(ctx)
+
+	peerLog("[PEER] ▶ %s | %s | %s %s | %s\n", modelID, getPeerReqID(request), request.Method, request.URL.Path, pp.peerID)
 
 	if pp.apiKey != "" {
 		request.Header.Set("Authorization", "Bearer "+pp.apiKey)
@@ -354,15 +391,51 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 		return nil
 	}
 
+	if pp.isInBackoff() {
+		pp.serveSerialized(writer, request)
+		return nil
+	}
+
 	if err := pp.waitForRequestInterval(request.Context(), request.URL.Path); err != nil {
-		fmt.Printf("[PEER ERROR] %s | rate_limit_cancelled | %s | %s\n",
-			modelID, request.URL.Path, err)
+		peerLog("[PEER ERROR] %s | %s | rate_limit_cancelled | %s | %s\n",
+			getPeerReqID(request), modelID, request.URL.Path, err)
 		http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 		return nil
 	}
 	pp.reverseProxy.ServeHTTP(writer, request)
 	pp.markRequestComplete()
 	return nil
+}
+
+// isInBackoff returns true when adaptive backoff is active (currentInterval > 0).
+// During backoff, requests are serialized to ensure the interval between
+// consecutive request completions is respected.
+func (pp *enhancedPeerMember) isInBackoff() bool {
+	pp.lastRequestMu.Lock()
+	defer pp.lastRequestMu.Unlock()
+	return pp.currentInterval > 0
+}
+
+// serveSerialized handles a request with full serialization during backoff.
+// It holds backoffMu across the entire request lifecycle (wait + serve + mark),
+// ensuring that the next request sees the real lastRequestTime after this one completes.
+func (pp *enhancedPeerMember) serveSerialized(writer http.ResponseWriter, request *http.Request) {
+	peerLog("[PEER] %s | %s | backoff_wait_lock | %s\n",
+		getPeerReqID(request), getPeerModel(request), pp.peerID)
+	pp.backoffMu.Lock()
+	defer pp.backoffMu.Unlock()
+
+	if err := pp.waitForRequestInterval(request.Context(), request.URL.Path); err != nil {
+		peerLog("[PEER ERROR] %s | %s | backoff_rate_limit_cancelled | %s\n",
+			getPeerReqID(request), getPeerModel(request), err)
+		http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	peerLog("[PEER] %s | %s | backoff_serial | %s\n",
+		getPeerReqID(request), getPeerModel(request), pp.peerID)
+	pp.reverseProxy.ServeHTTP(writer, request)
+	pp.markRequestComplete()
 }
 
 func (pp *enhancedPeerMember) recordFailure() {
@@ -385,7 +458,7 @@ func (pp *enhancedPeerMember) recordFailure() {
 		pp.currentInterval = pp.requestInterval
 	}
 
-	fmt.Printf("[PEER BACKOFF] %s ↑ %s (cap %s)\n",
+	peerLog("[PEER BACKOFF] %s ↑ %s (cap %s)\n",
 		pp.peerID, formatDuration(pp.currentInterval), formatDuration(pp.requestInterval))
 }
 
@@ -397,12 +470,12 @@ func (pp *enhancedPeerMember) recordSuccess() {
 		return
 	}
 
-	pp.currentInterval /= 2
+	pp.currentInterval = time.Duration(float64(pp.currentInterval) / 1.15)
 	if pp.currentInterval < pp.requestInterval/16 {
 		pp.currentInterval = 0
-		fmt.Printf("[PEER BACKOFF] %s ✓ recovered\n", pp.peerID)
+		peerLog("[PEER BACKOFF] %s ✓ recovered\n", pp.peerID)
 	} else {
-		fmt.Printf("[PEER BACKOFF] %s ↓ %s\n",
+		peerLog("[PEER BACKOFF] %s ↓ %s\n",
 			pp.peerID, formatDuration(pp.currentInterval))
 	}
 }
@@ -422,8 +495,8 @@ func (pp *enhancedPeerMember) waitForRequestInterval(ctx context.Context, reques
 	pp.lastRequestMu.Unlock()
 
 	if waitTime > 0 {
-		fmt.Printf("[PEER] %s | wait %s | %s\n",
-			getPeerModelFromCtx(ctx), formatDuration(waitTime), pp.peerID)
+		peerLog("[PEER] %s | %s | wait %s | %s\n",
+			getPeerReqIDFromCtx(ctx), getPeerModelFromCtx(ctx), formatDuration(waitTime), pp.peerID)
 		select {
 		case <-time.After(waitTime):
 			return nil
@@ -452,8 +525,6 @@ func (pp *enhancedPeerMember) processQueue() {
 		select {
 		case req := <-pp.queue:
 			go func(qr *queuedRequest) {
-				// recover from http.ErrAbortHandler panics that can occur when the client
-				// disconnects before the response is sent
 				defer func() {
 					if r := recover(); r != nil {
 						if r == http.ErrAbortHandler {
@@ -470,13 +541,12 @@ func (pp *enhancedPeerMember) processQueue() {
 					return
 				}
 
-				// Wait for request interval BEFORE acquiring semaphore
-				if err := pp.waitForRequestInterval(qr.request.Context(), qr.request.URL.Path); err != nil {
-					fmt.Printf("[PEER ERROR] %s | rate_limit_cancelled | %s\n",
-						getPeerModel(qr.request), err)
-					if qr.responded.CompareAndSwap(false, true) {
-						http.Error(qr.writer, err.Error(), http.StatusServiceUnavailable)
-					}
+				if pp.isInBackoff() {
+					qr.responded.Store(true)
+					timeoutCtx, cancel := context.WithTimeout(qr.request.Context(), pp.queueTimeout)
+					req := qr.request.WithContext(timeoutCtx)
+					pp.serveSerialized(qr.writer, req)
+					cancel()
 					close(qr.done)
 					return
 				}
@@ -487,14 +557,14 @@ func (pp *enhancedPeerMember) processQueue() {
 					ctx := qr.request.Context()
 					select {
 					case <-ctx.Done():
-						fmt.Printf("[PEER] %s | cancelled | %s\n",
-							getPeerModel(qr.request), pp.peerID)
+						peerLog("[PEER] %s | %s | cancelled | %s\n",
+							getPeerReqID(qr.request), getPeerModel(qr.request), pp.peerID)
 					default:
-						fmt.Printf("[PEER] %s | dequeue | %d/%d slots | %s\n",
-							getPeerModel(qr.request), len(pp.sem), pp.maxConcurrent, pp.peerID)
+						peerLog("[PEER] %s | %s | dequeue | %d/%d slots | %s\n",
+							getPeerReqID(qr.request), getPeerModel(qr.request), len(pp.sem), pp.maxConcurrent, pp.peerID)
 						if qr.cancelled.Load() {
-							fmt.Printf("[PEER] %s | cancelled_before_serve | %s\n",
-								getPeerModel(qr.request), pp.peerID)
+							peerLog("[PEER] %s | %s | cancelled_before_serve | %s\n",
+								getPeerReqID(qr.request), getPeerModel(qr.request), pp.peerID)
 						} else {
 							qr.responded.Store(true)
 							pp.reverseProxy.ServeHTTP(qr.writer, qr.request)
@@ -502,14 +572,14 @@ func (pp *enhancedPeerMember) processQueue() {
 						}
 					}
 				case <-time.After(pp.queueTimeout):
-					fmt.Printf("[PEER ERROR] %s | queue_timeout | %s\n",
-						getPeerModel(qr.request), pp.peerID)
+					peerLog("[PEER ERROR] %s | %s | queue_timeout | %s\n",
+						getPeerReqID(qr.request), getPeerModel(qr.request), pp.peerID)
 					if qr.responded.CompareAndSwap(false, true) {
 						http.Error(qr.writer, "request timed out waiting in queue", http.StatusServiceUnavailable)
 					}
 				case <-qr.request.Context().Done():
-					fmt.Printf("[PEER] %s | cancelled_in_queue | %s\n",
-						getPeerModel(qr.request), pp.peerID)
+					peerLog("[PEER] %s | %s | cancelled_in_queue | %s\n",
+						getPeerReqID(qr.request), getPeerModel(qr.request), pp.peerID)
 				}
 				close(qr.done)
 			}(req)
@@ -527,26 +597,23 @@ func (pp *enhancedPeerMember) processQueue() {
 	}
 }
 
-// serveWithConcurrencyControl handles request concurrency with semaphore and queue
+// serveWithConcurrencyControl handles request concurrency with semaphore and queue.
+// During backoff, requests are serialized via serveSerialized instead.
 func (pp *enhancedPeerMember) serveWithConcurrencyControl(writer http.ResponseWriter, request *http.Request) serveResult {
 	if pp.maxConcurrent == 0 {
 		return serveContinue
 	}
 
-	fmt.Printf("[PEER] %s | %d/%d slots | %s\n",
-		getPeerModel(request), len(pp.sem), pp.maxConcurrent, pp.peerID)
-
-	if err := pp.waitForRequestInterval(request.Context(), request.URL.Path); err != nil {
-		fmt.Printf("[PEER ERROR] %s | rate_limit_cancelled | %s\n",
-			getPeerModel(request), err)
-		http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+	if pp.isInBackoff() {
+		pp.serveSerialized(writer, request)
 		return serveHandled
 	}
 
+	peerLog("[PEER] %s | %s | %d/%d slots | %s\n",
+		getPeerReqID(request), getPeerModel(request), len(pp.sem), pp.maxConcurrent, pp.peerID)
+
 	select {
 	case pp.sem <- struct{}{}:
-		// Use defer to guarantee semaphore release even if ServeHTTP panics
-		// (e.g., http.ErrAbortHandler when client disconnects during streaming)
 		defer func() { <-pp.sem }()
 		pp.reverseProxy.ServeHTTP(writer, request)
 		pp.markRequestComplete()
@@ -575,8 +642,8 @@ func (pp *enhancedPeerMember) serveWithConcurrencyControl(writer http.ResponseWr
 			return serveHandled
 		case <-request.Context().Done():
 			qr.cancelled.Store(true)
-			fmt.Printf("[PEER] %s | disconnect_queued | %s\n",
-				getPeerModel(request), pp.peerID)
+			peerLog("[PEER] %s | %s | disconnect_queued | %s\n",
+				getPeerReqID(request), getPeerModel(request), pp.peerID)
 			<-done
 			if qr.responded.CompareAndSwap(false, true) {
 				http.Error(writer, "client disconnected", 499)
