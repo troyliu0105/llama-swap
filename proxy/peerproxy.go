@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/proxy/config"
 )
 
@@ -32,7 +33,7 @@ type peerProxyMember struct {
 	sem             chan struct{}
 	queue           chan *queuedRequest
 	waitingCount    int32
-	logger          *LogMonitor
+	logger          *logmon.Monitor
 	stopCh          chan struct{}
 
 	lastRequestMu   sync.Mutex
@@ -61,7 +62,7 @@ type PeerProxy struct {
 	prefixPeerModels bool
 }
 
-func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, proxyLogger *LogMonitor) (*PeerProxy, error) {
+func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, proxyLogger *logmon.Monitor) (*PeerProxy, error) {
 	proxyMap := make(map[string]*peerProxyMember)
 	prefixedModels := make(map[string]bool)
 
@@ -75,22 +76,20 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, prox
 	for _, peerID := range peerIDs {
 		peer := peers[peerID]
 
-		// Create per-peer transport with configurable timeout
-		peerTimeout := peer.Timeout
-		if peerTimeout <= 0 {
-			peerTimeout = 60 * time.Second
-		}
+		// Create a transport with per-peer timeout configuration
 		peerTransport := &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
+				Timeout:   time.Duration(peer.Timeouts.Connect) * time.Second,
+				KeepAlive: time.Duration(peer.Timeouts.KeepAlive) * time.Second,
 			}).DialContext,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: peerTimeout,
-			ExpectContinueTimeout: 1 * time.Second,
+			TLSHandshakeTimeout:   time.Duration(peer.Timeouts.TLSHandshake) * time.Second,
+			ResponseHeaderTimeout: time.Duration(peer.Timeouts.ResponseHeader) * time.Second,
+			ExpectContinueTimeout: time.Duration(peer.Timeouts.ExpectContinue) * time.Second,
+			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
-			IdleConnTimeout:       90 * time.Second,
+			IdleConnTimeout:       time.Duration(peer.Timeouts.IdleConn) * time.Second,
 		}
 
 		// Create reverse proxy for this peer
@@ -149,7 +148,7 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, prox
 				}
 			}
 
-			if proxyLogger.IsLevelEnabled(LevelTrace) && readErr == nil {
+			if proxyLogger.IsLevelEnabled(logmon.LevelTrace) && readErr == nil {
 				contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 				if strings.Contains(contentType, "application/json") || strings.Contains(contentType, "text/") {
 					logBody := string(body)

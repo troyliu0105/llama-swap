@@ -891,7 +891,7 @@ func TestPeerProxy_LogsBusinessError200ToStdout(t *testing.T) {
 
 func TestPeerProxy_LogsTimeoutToStdout(t *testing.T) {
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(2 * time.Second)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer testServer.Close()
@@ -902,7 +902,9 @@ func TestPeerProxy_LogsTimeoutToStdout(t *testing.T) {
 			Proxy:    testServer.URL,
 			ProxyURL: proxyURL,
 			Models:   []string{"test-model"},
-			Timeout:  50 * time.Millisecond,
+			Timeouts: config.TimeoutsConfig{
+				ResponseHeader: 1,
+			},
 		},
 	}
 
@@ -1145,4 +1147,46 @@ func TestProxyRequest_ContextCancellation_DirectPath(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, 499, w.Code, "Expected 499 Client Closed Request when context cancelled during proxy")
+}
+
+func TestNewPeerProxy_CustomTimeouts(t *testing.T) {
+	proxyURL, _ := url.Parse("http://localhost:8080")
+
+	peers := config.PeerDictionaryConfig{
+		"test-peer": config.PeerConfig{
+			Proxy:    "http://localhost:8080",
+			ProxyURL: proxyURL,
+			Models:   []string{"model1"},
+			Timeouts: config.TimeoutsConfig{
+				Connect:        45,
+				ResponseHeader: 300,
+				TLSHandshake:   15,
+				ExpectContinue: 2,
+				IdleConn:       120,
+			},
+		},
+	}
+
+	peerProxy, err := NewPeerProxy(peers, false, testLogger)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, peerProxy)
+	assert.True(t, peerProxy.HasPeerModel("model1"))
+
+	// Verify the timeout values are actually applied to the transport
+	member, found := peerProxy.proxyMap["model1"]
+	require.True(t, found, "model1 should exist in proxyMap")
+	assert.NotNil(t, member.reverseProxy)
+	assert.NotNil(t, member.reverseProxy.Transport)
+
+	transport, ok := member.reverseProxy.Transport.(*http.Transport)
+	require.True(t, ok, "Transport should be *http.Transport")
+
+	// Verify all timeout values are correctly applied
+	assert.Equal(t, 300*time.Second, transport.ResponseHeaderTimeout)
+	assert.Equal(t, 15*time.Second, transport.TLSHandshakeTimeout)
+	assert.Equal(t, 2*time.Second, transport.ExpectContinueTimeout)
+	assert.Equal(t, 120*time.Second, transport.IdleConnTimeout)
+	// ForceAttemptHTTP2 should be enabled
+	assert.True(t, transport.ForceAttemptHTTP2)
 }

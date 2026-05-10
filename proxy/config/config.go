@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/billziss-gh/golib/shlex"
 	"gopkg.in/yaml.v3"
@@ -124,10 +125,17 @@ type Config struct {
 	LogToStdout        string                 `yaml:"logToStdout"`
 	MetricsMaxInMemory int                    `yaml:"metricsMaxInMemory"`
 	CaptureBuffer      int                    `yaml:"captureBuffer"`
+	Performance        PerformanceConfig      `yaml:"performance"`
 	GlobalTTL          int                    `yaml:"globalTTL"`
 	Models             map[string]ModelConfig `yaml:"models"` /* key is model ID */
 	Profiles           map[string][]string    `yaml:"profiles"`
 	Groups             map[string]GroupConfig `yaml:"groups"` /* key is group ID */
+
+	// swap matrix: solver-based alternative to groups
+	Matrix *MatrixConfig `yaml:"matrix"`
+
+	// populated during validation when matrix is configured
+	ExpandedSets []ExpandedSet `yaml:"-"`
 
 	// for key/value replacements in model's cmd, cmdStop, proxy, checkEndPoint
 	Macros MacroList `yaml:"macros"`
@@ -218,6 +226,17 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 
 	if config.HealthCheckTimeout < 15 {
 		config.HealthCheckTimeout = 15
+	}
+
+	// Apply defaults for performance config when section is missing
+	if !config.Performance.Enable && config.Performance.Every == 0 && config.Performance.MaxAge == 0 && config.Performance.GC == 0 {
+		config.Performance.Enable = true
+		config.Performance.Every = 15 * time.Second
+		config.Performance.MaxAge = 1 * time.Hour
+		config.Performance.GC = 5 * time.Minute
+	}
+	if err = config.Performance.Validate(); err != nil {
+		return Config{}, fmt.Errorf("performance: %w", err)
 	}
 
 	if config.StartPort < 1 {
@@ -448,22 +467,35 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		config.Models[modelId] = modelConfig
 	}
 
-	config = AddDefaultGroupToConfig(config)
+	// groups XOR matrix
+	if config.Matrix != nil && len(config.Groups) > 0 {
+		return Config{}, fmt.Errorf("config cannot use both 'groups' and 'matrix'")
+	}
 
-	// Validate group members
-	memberUsage := make(map[string]string)
-	for groupID, groupConfig := range config.Groups {
-		prevSet := make(map[string]bool)
-		for _, member := range groupConfig.Members {
-			if _, found := prevSet[member]; found {
-				return Config{}, fmt.Errorf("duplicate model member %s found in group: %s", member, groupID)
-			}
-			prevSet[member] = true
+	if config.Matrix != nil {
+		expandedSets, err := ValidateMatrix(*config.Matrix, config.Models)
+		if err != nil {
+			return Config{}, fmt.Errorf("matrix: %w", err)
+		}
+		config.ExpandedSets = expandedSets
+	} else {
+		config = AddDefaultGroupToConfig(config)
 
-			if existingGroup, exists := memberUsage[member]; exists {
-				return Config{}, fmt.Errorf("model member %s is used in multiple groups: %s and %s", member, existingGroup, groupID)
+		// Validate group members
+		memberUsage := make(map[string]string)
+		for groupID, groupConfig := range config.Groups {
+			prevSet := make(map[string]bool)
+			for _, member := range groupConfig.Members {
+				if _, found := prevSet[member]; found {
+					return Config{}, fmt.Errorf("duplicate model member %s found in group: %s", member, groupID)
+				}
+				prevSet[member] = true
+
+				if existingGroup, exists := memberUsage[member]; exists {
+					return Config{}, fmt.Errorf("model member %s is used in multiple groups: %s and %s", member, existingGroup, groupID)
+				}
+				memberUsage[member] = groupID
 			}
-			memberUsage[member] = groupID
 		}
 	}
 
@@ -637,9 +669,6 @@ func validateMacro(name string, value any) error {
 	// Validate that value is a scalar type
 	switch v := value.(type) {
 	case string:
-		if len(v) >= 1024 {
-			return fmt.Errorf("macro value for '%s' exceeds maximum length of 1024 characters", name)
-		}
 		// Check for self-reference
 		macroSlug := fmt.Sprintf("${%s}", name)
 		if strings.Contains(v, macroSlug) {

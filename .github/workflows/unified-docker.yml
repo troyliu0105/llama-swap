@@ -36,6 +36,11 @@ on:
         type: boolean
         required: false
         default: true
+      push_to_ghcr:
+        description: "Push images to ghcr.io"
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: read
@@ -116,9 +121,16 @@ jobs:
           docker/unified/build-image.sh --${{ matrix.backend }}
 
       - name: Push to GitHub Container Registry
-        if: ${{ !env.ACT }}
+        if: ${{ !env.ACT && (github.event_name == 'schedule' || inputs.push_to_ghcr == true) }}
         run: |
-          docker push ghcr.io/mostlygeek/llama-swap:unified-${{ matrix.backend }}
+          BASE_TAG="ghcr.io/mostlygeek/llama-swap:unified-${{ matrix.backend }}"
           DATE_TAG=$(date -u +%Y-%m-%d)
-          docker tag ghcr.io/mostlygeek/llama-swap:unified-${{ matrix.backend }} ghcr.io/mostlygeek/llama-swap:unified-${{ matrix.backend }}-${DATE_TAG}
-          docker push ghcr.io/mostlygeek/llama-swap:unified-${{ matrix.backend }}-${DATE_TAG}
+
+          docker push "${BASE_TAG}"
+          docker tag "${BASE_TAG}" "${BASE_TAG}-${DATE_TAG}"
+          docker push "${BASE_TAG}-${DATE_TAG}"
+
+          ROOTLESS_TAG="${BASE_TAG}-rootless"
+          docker push "${ROOTLESS_TAG}"
+          docker tag "${ROOTLESS_TAG}" "${ROOTLESS_TAG}-${DATE_TAG}"
+          docker push "${ROOTLESS_TAG}-${DATE_TAG}"

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/mostlygeek/llama-swap/event"
+	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/proxy/config"
 )
 
@@ -58,8 +59,8 @@ type Process struct {
 	// closed when command exits
 	cmdWaitChan chan struct{}
 
-	processLogger *LogMonitor
-	proxyLogger   *LogMonitor
+	processLogger *logmon.Monitor
+	proxyLogger   *logmon.Monitor
 
 	healthCheckTimeout      int
 	healthCheckLoopInterval time.Duration
@@ -82,11 +83,14 @@ type Process struct {
 	// used for testing to override the default value
 	gracefulStopTimeout time.Duration
 
+	// used for testing to bypass subprocess and reverse proxy
+	testHandler http.Handler
+
 	// track the number of failed starts
 	failedStartCount int
 }
 
-func NewProcess(ID string, healthCheckTimeout int, config config.ModelConfig, processLogger *LogMonitor, proxyLogger *LogMonitor) *Process {
+func NewProcess(ID string, healthCheckTimeout int, config config.ModelConfig, processLogger *logmon.Monitor, proxyLogger *logmon.Monitor) *Process {
 	concurrentLimit := 10
 	if config.ConcurrencyLimit > 0 {
 		concurrentLimit = config.ConcurrencyLimit
@@ -101,13 +105,31 @@ func NewProcess(ID string, healthCheckTimeout int, config config.ModelConfig, pr
 	var reverseProxy *httputil.ReverseProxy
 	if proxyURL != nil {
 		reverseProxy = httputil.NewSingleHostReverseProxy(proxyURL)
+
+		// Create custom transport with configured timeouts
+		transport := &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   time.Duration(config.Timeouts.Connect) * time.Second,
+				KeepAlive: time.Duration(config.Timeouts.KeepAlive) * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   time.Duration(config.Timeouts.TLSHandshake) * time.Second,
+			ResponseHeaderTimeout: time.Duration(config.Timeouts.ResponseHeader) * time.Second,
+			ExpectContinueTimeout: time.Duration(config.Timeouts.ExpectContinue) * time.Second,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       time.Duration(config.Timeouts.IdleConn) * time.Second,
+		}
+		reverseProxy.Transport = transport
+
 		reverseProxy.ModifyResponse = func(resp *http.Response) error {
 			// prevent nginx from buffering streaming responses (e.g., SSE)
 			if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 				resp.Header.Set("X-Accel-Buffering", "no")
 			}
 
-			if proxyLogger.IsLevelEnabled(LevelTrace) {
+			if proxyLogger.IsLevelEnabled(logmon.LevelTrace) {
 				body, err := io.ReadAll(resp.Body)
 				if err == nil {
 					resp.Body.Close()
@@ -284,7 +306,7 @@ func sigmoidRerankScores(body []byte) ([]byte, bool, error) {
 }
 
 // LogMonitor returns the log monitor associated with the process.
-func (p *Process) LogMonitor() *LogMonitor {
+func (p *Process) LogMonitor() *logmon.Monitor {
 	return p.processLogger
 }
 
@@ -373,6 +395,49 @@ func (p *Process) forceState(newState ProcessState) {
 // it is a private method because starting is automatic but stopping can be called
 // at any time.
 func (p *Process) start() error {
+
+	// test-only fast path: skip subprocess, health check, and TTL goroutine
+	if p.testHandler != nil {
+		if curState, err := p.swapState(StateStopped, StateStarting); err != nil {
+			if err == ErrExpectedStateMismatch {
+				if curState == StateStarting {
+					p.waitStarting.Wait()
+					curState = p.CurrentState()
+					if curState == StateReady {
+						return nil
+					}
+					return fmt.Errorf("process was already starting but wound up in state %v", curState)
+				}
+				return fmt.Errorf("process was in state %v when start() was called", curState)
+			}
+			return fmt.Errorf("failed to set Process state to starting: current state: %v, error: %v", curState, err)
+		}
+		defer p.waitStarting.Done()
+
+		// Mimic the real stop path: cancelUpstream transitions
+		// StateStopping -> StateStopped and closes cmdWaitChan,
+		// matching what waitForCmd does for real subprocesses.
+		ch := make(chan struct{})
+		p.cmdMutex.Lock()
+		p.cancelUpstream = func() {
+			if curState := p.CurrentState(); curState == StateStopping {
+				if _, err := p.swapState(StateStopping, StateStopped); err != nil {
+					p.forceState(StateStopped)
+				}
+			} else {
+				p.forceState(StateStopped)
+			}
+			close(ch)
+		}
+		p.cmdWaitChan = ch
+		p.cmdMutex.Unlock()
+
+		if curState, err := p.swapState(StateStarting, StateReady); err != nil {
+			return fmt.Errorf("failed to set Process state to ready: current state: %v, error: %v", curState, err)
+		}
+		p.failedStartCount = 0
+		return nil
+	}
 
 	if p.config.Proxy == "" {
 		return fmt.Errorf("can not start(), upstream proxy missing")
@@ -524,7 +589,10 @@ func (p *Process) start() error {
 
 // Stop will wait for inflight requests to complete before stopping the process.
 func (p *Process) Stop() {
+
+	// guard to prevent multiple goroutines from stopping
 	if !isValidTransition(p.CurrentState(), StateStopping) {
+		p.proxyLogger.Debugf("<%s> Stop() suppressing invalid transition from %s to StateStopping", p.ID, p.CurrentState())
 		return
 	}
 
@@ -537,13 +605,17 @@ func (p *Process) Stop() {
 // StopImmediately will transition the process to the stopping state and stop the process with a SIGTERM.
 // If the process does not stop within the specified timeout, it will be forcefully stopped with a SIGKILL.
 func (p *Process) StopImmediately() {
-	if !isValidTransition(p.CurrentState(), StateStopping) {
+
+	// guard to prevent multiple goroutines from stopping the process
+	enterState := p.CurrentState()
+	if !isValidTransition(enterState, StateStopping) {
+		p.proxyLogger.Debugf("<%s> StopImmediate() suppressing invalid transition from %s to StateStopping", p.ID, p.CurrentState())
 		return
 	}
 
-	p.proxyLogger.Debugf("<%s> Stopping process, current state: %s", p.ID, p.CurrentState())
-	if curState, err := p.swapState(StateReady, StateStopping); err != nil {
-		p.proxyLogger.Infof("<%s> Stop() Ready -> StateStopping err: %v, current state: %v", p.ID, err, curState)
+	p.proxyLogger.Debugf("<%s> Stopping process, enter state: %s", p.ID, enterState)
+	if curState, err := p.swapState(enterState, StateStopping); err != nil {
+		p.proxyLogger.Infof("<%s> Stop() %s -> StateStopping err: %v, current state: %v", p.ID, enterState, err, curState)
 		return
 	}
 
@@ -715,6 +787,11 @@ func (p *Process) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if !srw.waitForCompletion(completionTimeout) {
 			p.proxyLogger.Warnf("<%s> status updates goroutine did not complete within %v, proceeding with proxy request", p.ID, completionTimeout)
 		}
+	}
+
+	if p.testHandler != nil {
+		p.testHandler.ServeHTTP(w, r)
+	} else if srw != nil {
 		p.reverseProxy.ServeHTTP(srw, r)
 	} else {
 		p.reverseProxy.ServeHTTP(w, r)
@@ -806,7 +883,7 @@ func (p *Process) cmdStopUpstreamProcess() error {
 }
 
 // Logger returns the logger for this process.
-func (p *Process) Logger() *LogMonitor {
+func (p *Process) Logger() *logmon.Monitor {
 	return p.processLogger
 }
 

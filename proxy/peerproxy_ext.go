@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/proxy/config"
 )
 
@@ -100,7 +101,7 @@ type enhancedPeerMember struct {
 	sem           chan struct{}
 	queue         chan *queuedRequest
 	waitingCount  int32
-	logger        *LogMonitor
+	logger        *logmon.Monitor
 	stopCh        chan struct{}
 
 	backoffMu       sync.Mutex
@@ -122,7 +123,7 @@ type EnhancedPeerProxy struct {
 }
 
 // NewEnhancedPeerProxy creates a new EnhancedPeerProxy with the given configuration
-func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels bool, proxyLogger *LogMonitor) (*EnhancedPeerProxy, error) {
+func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels bool, proxyLogger *logmon.Monitor) (*EnhancedPeerProxy, error) {
 	proxyMap := make(map[string]*enhancedPeerMember)
 	prefixedModels := make(map[string]bool)
 
@@ -233,7 +234,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 				}
 			}
 
-			if proxyLogger.IsLevelEnabled(LevelTrace) && readErr == nil {
+			if proxyLogger.IsLevelEnabled(logmon.LevelTrace) && readErr == nil {
 				contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 				if strings.Contains(contentType, "application/json") || strings.Contains(contentType, "text/") {
 					logBody := string(body)

@@ -25,6 +25,9 @@ type ExtendedPeerConfig struct {
 	StripV1Prefix    bool              `yaml:"stripV1Prefix"`
 	PrefixPeerModels *bool             `yaml:"prefixPeerModels"`
 	Timeout          time.Duration     `yaml:"timeout"`
+
+	// Timeout settings for proxy connections
+	Timeouts TimeoutsConfig `yaml:"timeouts"`
 }
 
 func (c *ExtendedPeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
@@ -40,6 +43,14 @@ func (c *ExtendedPeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) er
 		QueueTimeout:    60 * time.Second,
 		Timeout:         60 * time.Second,
 		RequestInterval: 0,
+		Timeouts: TimeoutsConfig{
+			Connect:        30,
+			KeepAlive:      30,
+			ResponseHeader: 60,
+			TLSHandshake:   10,
+			ExpectContinue: 1,
+			IdleConn:       90,
+		},
 	}
 
 	if err := unmarshal(&defaults); err != nil {
