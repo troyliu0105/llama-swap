@@ -123,18 +123,43 @@ type metricsMonitor struct {
 	// capture fields
 	enableCaptures bool
 	captureCache   *cache.Cache // zstd-compressed CBOR of ReqRespCapture
+	captureStore   *captureStore
 }
 
 // newMetricsMonitor creates a new metricsMonitor. captureBufferMB is the
 // capture buffer size in megabytes; 0 disables captures.
-func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB int) *metricsMonitor {
+func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB int, captureStore *captureStore) *metricsMonitor {
 	mm := &metricsMonitor{
 		logger:         logger,
 		metrics:        ring.NewBuffer[ActivityLogEntry](maxMetrics),
 		enableCaptures: captureBufferMB > 0,
+		captureStore:   captureStore,
 	}
 	if captureBufferMB > 0 {
 		mm.captureCache = cache.New(captureBufferMB * 1024 * 1024)
+	}
+	if mm.captureCache != nil && captureStore != nil {
+		entries, err := captureStore.Load()
+		if err != nil {
+			logger.Warnf("failed to load capture persistence: %v", err)
+		} else {
+			maxID := mm.nextID - 1
+			for _, entry := range entries {
+				if err := mm.captureCache.Add(entry.ID, entry.Data); err != nil {
+					logger.Warnf("failed to restore capture %d: %v", entry.ID, err)
+					continue
+				}
+				if entry.ID > maxID {
+					maxID = entry.ID
+				}
+			}
+			if maxID >= mm.nextID {
+				mm.nextID = maxID + 1
+			}
+		}
+		if err := captureStore.Compact(); err != nil {
+			logger.Warnf("failed to compact capture persistence: %v", err)
+		}
 	}
 	return mm
 }
@@ -172,6 +197,13 @@ func (mp *metricsMonitor) addCapture(capture ReqRespCapture) bool {
 	if err := mp.captureCache.Add(capture.ID, compressed); err != nil {
 		mp.logger.Warnf("capture %d too large (%d bytes), skipping: %v", capture.ID, len(compressed), err)
 		return false
+	}
+	if mp.captureStore != nil {
+		go func(id int, data []byte) {
+			if err := mp.captureStore.Append(id, data); err != nil {
+				mp.logger.Warnf("failed to persist capture %d: %v", id, err)
+			}
+		}(capture.ID, compressed)
 	}
 
 	compressionRatio := (1 - float64(len(compressed))/float64(uncompressedBytes)) * 100

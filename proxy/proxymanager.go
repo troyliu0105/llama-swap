@@ -178,6 +178,14 @@ func New(proxyConfig config.Config) *ProxyManager {
 	} else {
 		maxMetrics = proxyConfig.MetricsMaxInMemory
 	}
+	var cs *captureStore
+	if proxyConfig.CapturePersistPath != "" {
+		maxPersist := proxyConfig.CapturePersistMax
+		if maxPersist <= 0 {
+			maxPersist = 5120
+		}
+		cs = newCaptureStore(proxyConfig.CapturePersistPath, maxPersist, proxyLogger)
+	}
 
 	peerProxy, err := NewEnhancedPeerProxy(proxyConfig.Peers, proxyConfig.PrefixPeerModels, proxyLogger)
 	if err != nil {
@@ -193,7 +201,7 @@ func New(proxyConfig config.Config) *ProxyManager {
 		muxLogger:      muxLogger,
 		upstreamLogger: upstreamLogger,
 
-		metricsMonitor: newMetricsMonitor(proxyLogger, maxMetrics, proxyConfig.CaptureBuffer),
+		metricsMonitor: newMetricsMonitor(proxyLogger, maxMetrics, proxyConfig.CaptureBuffer, cs),
 
 		processGroups: make(map[string]*ProcessGroup),
 
