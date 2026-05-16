@@ -45,7 +45,6 @@ CREATE TABLE IF NOT EXISTS captures (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     request_log_id  INTEGER NOT NULL REFERENCES request_log(id) ON DELETE CASCADE,
-    seq_num         INTEGER NOT NULL DEFAULT 0,
     data            BLOB NOT NULL,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
