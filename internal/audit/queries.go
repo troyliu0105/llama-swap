@@ -188,6 +188,8 @@ func (s *AuditStore) GetCaptureByMetricID(metricID int64) ([]byte, error) {
 		SELECT c.data FROM captures c
 		JOIN request_log rl ON rl.id = c.request_log_id
 		WHERE rl.metric_id = ?
+		ORDER BY rl.created_at DESC, rl.id DESC
+		LIMIT 1
 	`, metricID).Scan(&data)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -196,6 +198,18 @@ func (s *AuditStore) GetCaptureByMetricID(metricID int64) ([]byte, error) {
 		return nil, fmt.Errorf("get capture by metric id: %w", err)
 	}
 	return data, nil
+}
+
+func (s *AuditStore) GetMaxMetricID() (int, error) {
+	var maxID sql.NullInt64
+	err := s.db.QueryRow(`SELECT MAX(metric_id) FROM request_log`).Scan(&maxID)
+	if err != nil {
+		return 0, fmt.Errorf("get max metric id: %w", err)
+	}
+	if !maxID.Valid {
+		return 0, nil
+	}
+	return int(maxID.Int64), nil
 }
 
 func periodSince(period string) string {

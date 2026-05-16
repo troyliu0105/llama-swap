@@ -147,6 +147,11 @@ func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB i
 
 func (mp *metricsMonitor) SetAuditStore(store *audit.AuditStore) {
 	mp.auditStore = store
+	if store != nil {
+		if maxID, err := store.GetMaxMetricID(); err == nil && maxID >= mp.nextID {
+			mp.nextID = maxID + 1
+		}
+	}
 }
 
 func (mp *metricsMonitor) SetAPIKeys(keys config.APIKeyMap) {
@@ -734,6 +739,12 @@ func (w *responseBodyCopier) Header() http.Header {
 
 func (w *responseBodyCopier) StartTime() time.Time {
 	return w.start
+}
+
+func (w *responseBodyCopier) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // sensitiveHeaders lists headers that should be redacted in captures

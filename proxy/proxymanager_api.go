@@ -363,6 +363,20 @@ func (pm *ProxyManager) apiGetCapture(c *gin.Context) {
 		return
 	}
 
+	// Check in-memory captures first to avoid stale audit data from metric_id
+	// collisions (metric IDs reset to 0 on each process restart).
+	capture := pm.metricsMonitor.getCaptureByID(id)
+	if capture != nil && !(capture.ReqPath == "" && capture.ReqHeaders == nil && capture.ReqBody == nil && capture.RespHeaders == nil && capture.RespBody == nil) {
+		jsonBytes, err := json.Marshal(capture)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal capture"})
+			return
+		}
+		c.Data(http.StatusOK, "application/json", jsonBytes)
+		return
+	}
+
+	// Fall back to audit store for historical captures
 	if pm.auditStore != nil {
 		data, err := pm.auditStore.GetCaptureByMetricID(int64(id))
 		if err != nil {
@@ -387,18 +401,7 @@ func (pm *ProxyManager) apiGetCapture(c *gin.Context) {
 		return
 	}
 
-	capture := pm.metricsMonitor.getCaptureByID(id)
-	if capture == nil || (capture.ReqPath == "" && capture.ReqHeaders == nil && capture.ReqBody == nil && capture.RespHeaders == nil && capture.RespBody == nil) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "capture not found"})
-		return
-	}
-
-	jsonBytes, err := json.Marshal(capture)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal capture"})
-		return
-	}
-	c.Data(http.StatusOK, "application/json", jsonBytes)
+	c.JSON(http.StatusNotFound, gin.H{"error": "capture not found"})
 }
 
 func (pm *ProxyManager) apiAuditUsers(c *gin.Context) {

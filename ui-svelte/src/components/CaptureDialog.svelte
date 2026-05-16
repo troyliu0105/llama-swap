@@ -103,10 +103,17 @@
       if (data === "[DONE]") continue;
       try {
         const parsed = JSON.parse(data);
+
+        // v1/chat/completions format: choices[0].delta.content
         const delta = parsed.choices?.[0]?.delta;
         if (delta?.content) result.content += delta.content;
         if (delta?.reasoning_content) result.reasoning += delta.reasoning_content;
         if (delta?.reasoning) result.reasoning += delta.reasoning;
+
+        // v1/responses format: response.output_text.delta
+        if (parsed.type === "response.output_text.delta" && parsed.delta) {
+          result.content += parsed.delta;
+        }
       } catch {
         // skip unparseable lines
       }
