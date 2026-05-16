@@ -22,7 +22,7 @@ import (
 
 func TestMetricsMonitor_AddMetrics(t *testing.T) {
 	t.Run("adds metrics and assigns ID", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		metric := ActivityLogEntry{
 			Model: "test-model",
@@ -43,7 +43,7 @@ func TestMetricsMonitor_AddMetrics(t *testing.T) {
 	})
 
 	t.Run("increments ID for each metric", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		for i := 0; i < 5; i++ {
 			mm.queueMetrics(ActivityLogEntry{Model: "model"})
@@ -57,7 +57,7 @@ func TestMetricsMonitor_AddMetrics(t *testing.T) {
 	})
 
 	t.Run("respects max metrics limit", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 3, 0)
+		mm := newMetricsMonitor(testLogger, 3, 0, nil)
 
 		// Add 5 metrics
 		for i := 0; i < 5; i++ {
@@ -79,7 +79,7 @@ func TestMetricsMonitor_AddMetrics(t *testing.T) {
 	})
 
 	t.Run("emits ActivityLogEvent", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		receivedEvent := make(chan ActivityLogEvent, 1)
 		cancel := event.On(func(e ActivityLogEvent) {
@@ -112,14 +112,14 @@ func TestMetricsMonitor_AddMetrics(t *testing.T) {
 
 func TestMetricsMonitor_GetMetrics(t *testing.T) {
 	t.Run("returns empty slice when no metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 		metrics := mm.getMetrics()
 		assert.NotNil(t, metrics)
 		assert.Equal(t, 0, len(metrics))
 	})
 
 	t.Run("returns copy of metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 		mm.queueMetrics(ActivityLogEntry{Model: "model1"})
 		mm.queueMetrics(ActivityLogEntry{Model: "model2"})
 
@@ -139,7 +139,7 @@ func TestMetricsMonitor_GetMetrics(t *testing.T) {
 
 func TestMetricsMonitor_GetMetricsJSON(t *testing.T) {
 	t.Run("returns valid JSON for empty metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 		jsonData, err := mm.getMetricsJSON()
 		assert.NoError(t, err)
 		assert.NotNil(t, jsonData)
@@ -151,7 +151,7 @@ func TestMetricsMonitor_GetMetricsJSON(t *testing.T) {
 	})
 
 	t.Run("returns valid JSON with metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 		mm.queueMetrics(ActivityLogEntry{
 			Model: "model1",
 			Tokens: TokenMetrics{
@@ -183,7 +183,7 @@ func TestMetricsMonitor_GetMetricsJSON(t *testing.T) {
 
 func TestMetricsMonitor_WrapHandler(t *testing.T) {
 	t.Run("successful non-streaming request with usage data", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := `{
 			"usage": {
@@ -214,7 +214,7 @@ func TestMetricsMonitor_WrapHandler(t *testing.T) {
 	})
 
 	t.Run("successful request with timings data", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := `{
 			"timings": {
@@ -254,7 +254,7 @@ func TestMetricsMonitor_WrapHandler(t *testing.T) {
 	})
 
 	t.Run("streaming request with SSE format", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		// Note: SSE format requires proper line breaks - each data line followed by blank line
 		responseBody := `data: {"choices":[{"text":"Hello"}]}
@@ -290,7 +290,7 @@ data: [DONE]
 	})
 
 	t.Run("non-OK status code records partial metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		nextHandler := func(modelID string, w http.ResponseWriter, r *http.Request) error {
 			w.WriteHeader(http.StatusBadRequest)
@@ -315,7 +315,7 @@ data: [DONE]
 	})
 
 	t.Run("empty response body records minimal metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		nextHandler := func(modelID string, w http.ResponseWriter, r *http.Request) error {
 			w.WriteHeader(http.StatusOK)
@@ -337,7 +337,7 @@ data: [DONE]
 	})
 
 	t.Run("invalid JSON records minimal metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		nextHandler := func(modelID string, w http.ResponseWriter, r *http.Request) error {
 			w.Header().Set("Content-Type", "application/json")
@@ -361,7 +361,7 @@ data: [DONE]
 	})
 
 	t.Run("next handler error is propagated", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		expectedErr := assert.AnError
 		nextHandler := func(modelID string, w http.ResponseWriter, r *http.Request) error {
@@ -380,7 +380,7 @@ data: [DONE]
 	})
 
 	t.Run("response without usage or timings records minimal metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := `{"result": "ok"}`
 
@@ -406,7 +406,7 @@ data: [DONE]
 	})
 
 	t.Run("infill request extracts timings from last array element", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		// Infill response is an array with timings in the last element
 		responseBody := `[
@@ -449,7 +449,7 @@ data: [DONE]
 	})
 
 	t.Run("infill request with empty array records minimal metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := `[]`
 
@@ -522,7 +522,7 @@ func TestMetricsMonitor_ResponseBodyCopier(t *testing.T) {
 
 func TestMetricsMonitor_Concurrent(t *testing.T) {
 	t.Run("concurrent queueMetrics is safe", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 1000, 0)
+		mm := newMetricsMonitor(testLogger, 1000, 0, nil)
 
 		var wg sync.WaitGroup
 		numGoroutines := 10
@@ -551,7 +551,7 @@ func TestMetricsMonitor_Concurrent(t *testing.T) {
 	})
 
 	t.Run("concurrent reads and writes are safe", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 100, 0)
+		mm := newMetricsMonitor(testLogger, 100, 0, nil)
 
 		done := make(chan bool)
 
@@ -610,7 +610,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 	})
 
 	t.Run("prefers timings over usage data", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		// Timings should take precedence over usage
 		responseBody := `{
@@ -650,7 +650,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 	})
 
 	t.Run("handles missing cache_n in timings", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := `{
 			"timings": {
@@ -683,7 +683,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 	})
 
 	t.Run("parses prompt_tokens_details.cached_tokens format", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := `{
 			"usage": {
@@ -717,7 +717,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 	})
 
 	t.Run("calculates fallback speed without timings", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		// 100 prompt tokens, 50 completion tokens, 1000ms duration
 		// expected: tokens_per_second = 50 / 1.0 = 50.0
@@ -752,7 +752,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 	})
 
 	t.Run("fallback speed excludes cached tokens from prompt calculation", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		// 100 prompt tokens, 30 cached, 50 completion tokens, 1000ms duration
 		// expected: prompt_per_second = (100 - 30) / 1.0 = 70.0
@@ -793,7 +793,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 
 func TestMetricsMonitor_StreamingResponse(t *testing.T) {
 	t.Run("finds metrics in last valid SSE data", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		// Metrics should be found in the last data line before [DONE]
 		responseBody := `data: {"choices":[{"text":"First"}]}
@@ -827,7 +827,7 @@ data: [DONE]
 	})
 
 	t.Run("handles streaming with no valid JSON records minimal metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := `data: not json
 
@@ -857,7 +857,7 @@ data: [DONE]
 	})
 
 	t.Run("v1/responses format with nested response.usage", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		// v1/responses SSE format: usage is nested under response.usage
 		responseBody := "event: response.completed\n" +
@@ -886,7 +886,7 @@ data: [DONE]
 	})
 
 	t.Run("handles empty streaming response records minimal metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := ``
 
@@ -914,7 +914,7 @@ data: [DONE]
 
 // Benchmark tests
 func BenchmarkMetricsMonitor_AddMetrics(b *testing.B) {
-	mm := newMetricsMonitor(testLogger, 1000, 0)
+	mm := newMetricsMonitor(testLogger, 1000, 0, nil)
 
 	metric := ActivityLogEntry{
 		Model: "test-model",
@@ -937,7 +937,7 @@ func BenchmarkMetricsMonitor_AddMetrics(b *testing.B) {
 
 func BenchmarkMetricsMonitor_AddMetrics_SmallBuffer(b *testing.B) {
 	// Test performance with a smaller buffer where wrapping occurs more frequently
-	mm := newMetricsMonitor(testLogger, 100, 0)
+	mm := newMetricsMonitor(testLogger, 100, 0, nil)
 
 	metric := ActivityLogEntry{
 		Model: "test-model",
@@ -960,7 +960,7 @@ func BenchmarkMetricsMonitor_AddMetrics_SmallBuffer(b *testing.B) {
 
 func TestMetricsMonitor_WrapHandler_Compression(t *testing.T) {
 	t.Run("gzip encoded response", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := `{"usage": {"prompt_tokens": 100, "completion_tokens": 50}}`
 
@@ -994,7 +994,7 @@ func TestMetricsMonitor_WrapHandler_Compression(t *testing.T) {
 	})
 
 	t.Run("deflate encoded response", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := `{"usage": {"prompt_tokens": 200, "completion_tokens": 75}}`
 
@@ -1028,7 +1028,7 @@ func TestMetricsMonitor_WrapHandler_Compression(t *testing.T) {
 	})
 
 	t.Run("invalid gzip data records minimal metrics", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		// Invalid compressed data
 		invalidData := []byte("this is not gzip data")
@@ -1056,7 +1056,7 @@ func TestMetricsMonitor_WrapHandler_Compression(t *testing.T) {
 	})
 
 	t.Run("unknown encoding treated as uncompressed", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		responseBody := `{"usage": {"prompt_tokens": 300, "completion_tokens": 100}}`
 
@@ -1108,7 +1108,7 @@ func TestReqRespCapture_CompressedSize(t *testing.T) {
 
 func TestMetricsMonitor_AddCapture(t *testing.T) {
 	t.Run("does nothing when captures disabled", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		capture := ReqRespCapture{
 			ID:      0,
@@ -1121,7 +1121,7 @@ func TestMetricsMonitor_AddCapture(t *testing.T) {
 	})
 
 	t.Run("adds capture when enabled", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 5)
+		mm := newMetricsMonitor(testLogger, 10, 5, nil)
 
 		capture := ReqRespCapture{
 			ID:       0,
@@ -1138,7 +1138,7 @@ func TestMetricsMonitor_AddCapture(t *testing.T) {
 	})
 
 	t.Run("evicts oldest when exceeding max size", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 5)
+		mm := newMetricsMonitor(testLogger, 10, 5, nil)
 		// Each full ReqRespCapture with 80 bytes random data compresses to ~185 bytes.
 		// 2 captures = ~370 bytes, 3 captures = ~555 bytes. Set limit so only 2 fit.
 		mm.captureCache = cache.New(450)
@@ -1163,7 +1163,7 @@ func TestMetricsMonitor_AddCapture(t *testing.T) {
 	})
 
 	t.Run("skips capture larger than max size", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 5)
+		mm := newMetricsMonitor(testLogger, 10, 5, nil)
 		mm.captureCache = cache.New(100)
 
 		// Use random data that doesn't compress well to create an oversized capture
@@ -1178,13 +1178,13 @@ func TestMetricsMonitor_AddCapture(t *testing.T) {
 
 func TestMetricsMonitor_GetCaptureByID(t *testing.T) {
 	t.Run("returns nil for non-existent ID", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 5)
+		mm := newMetricsMonitor(testLogger, 10, 5, nil)
 
 		assert.Nil(t, mm.getCaptureByID(999))
 	})
 
 	t.Run("returns decompressed capture by ID", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 5)
+		mm := newMetricsMonitor(testLogger, 10, 5, nil)
 
 		capture := ReqRespCapture{
 			ID:       42,
@@ -1201,7 +1201,7 @@ func TestMetricsMonitor_GetCaptureByID(t *testing.T) {
 	})
 
 	t.Run("stores data as compressed bytes", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 5)
+		mm := newMetricsMonitor(testLogger, 10, 5, nil)
 
 		capture := ReqRespCapture{
 			ID:       42,
@@ -1265,7 +1265,7 @@ func TestRedactHeaders(t *testing.T) {
 
 func TestMetricsMonitor_WrapHandler_Capture(t *testing.T) {
 	t.Run("captures request and response when enabled", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 5)
+		mm := newMetricsMonitor(testLogger, 10, 5, nil)
 
 		requestBody := `{"model": "test", "prompt": "hello"}`
 		responseBody := `{"usage": {"prompt_tokens": 100, "completion_tokens": 50}}`
@@ -1306,7 +1306,7 @@ func TestMetricsMonitor_WrapHandler_Capture(t *testing.T) {
 	})
 
 	t.Run("does not capture when disabled", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 0)
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
 		requestBody := `{"model": "test"}`
 		responseBody := `{"usage": {"prompt_tokens": 100, "completion_tokens": 50}}`
@@ -1347,7 +1347,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 	}
 
 	t.Run("only request headers", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 100)
+		mm := newMetricsMonitor(testLogger, 10, 100, nil)
 		req := httptest.NewRequest("POST", "/test", bytes.NewBufferString(requestBody))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer secret")
@@ -1367,7 +1367,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 	})
 
 	t.Run("only request body", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 100)
+		mm := newMetricsMonitor(testLogger, 10, 100, nil)
 		req := httptest.NewRequest("POST", "/test", bytes.NewBufferString(requestBody))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
@@ -1385,7 +1385,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 	})
 
 	t.Run("only response headers", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 100)
+		mm := newMetricsMonitor(testLogger, 10, 100, nil)
 		req := httptest.NewRequest("POST", "/test", bytes.NewBufferString(requestBody))
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
@@ -1403,7 +1403,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 	})
 
 	t.Run("only response body", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 100)
+		mm := newMetricsMonitor(testLogger, 10, 100, nil)
 		req := httptest.NewRequest("POST", "/test", bytes.NewBufferString(requestBody))
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
@@ -1420,7 +1420,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 	})
 
 	t.Run("captureReqAll", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 100)
+		mm := newMetricsMonitor(testLogger, 10, 100, nil)
 		req := httptest.NewRequest("POST", "/test", bytes.NewBufferString(requestBody))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer secret")
@@ -1440,7 +1440,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 	})
 
 	t.Run("captureRespAll", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 100)
+		mm := newMetricsMonitor(testLogger, 10, 100, nil)
 		req := httptest.NewRequest("POST", "/test", bytes.NewBufferString(requestBody))
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
@@ -1458,7 +1458,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 	})
 
 	t.Run("no flags", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 100)
+		mm := newMetricsMonitor(testLogger, 10, 100, nil)
 		req := httptest.NewRequest("POST", "/test", bytes.NewBufferString(requestBody))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
@@ -1476,7 +1476,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 	})
 
 	t.Run("mixed flags req headers and resp body", func(t *testing.T) {
-		mm := newMetricsMonitor(testLogger, 10, 100)
+		mm := newMetricsMonitor(testLogger, 10, 100, nil)
 		req := httptest.NewRequest("POST", "/test", bytes.NewBufferString(requestBody))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer secret")

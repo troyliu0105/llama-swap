@@ -124,6 +124,7 @@ type metricsMonitor struct {
 	enableCaptures bool
 	captureCache   *cache.Cache // zstd-compressed CBOR of ReqRespCapture
 	captureStore   *captureStore
+	capturedIDs    map[int]bool // all IDs that have persisted captures
 }
 
 // newMetricsMonitor creates a new metricsMonitor. captureBufferMB is the
@@ -137,6 +138,7 @@ func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB i
 	}
 	if captureBufferMB > 0 {
 		mm.captureCache = cache.New(captureBufferMB * 1024 * 1024)
+		mm.capturedIDs = make(map[int]bool)
 	}
 	if mm.captureCache != nil && captureStore != nil {
 		entries, err := captureStore.Load()
@@ -149,6 +151,7 @@ func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB i
 					logger.Warnf("failed to restore capture %d: %v", entry.ID, err)
 					continue
 				}
+				mm.capturedIDs[entry.ID] = true
 				if entry.ID > maxID {
 					maxID = entry.ID
 				}
@@ -198,6 +201,9 @@ func (mp *metricsMonitor) addCapture(capture ReqRespCapture) bool {
 		mp.logger.Warnf("capture %d too large (%d bytes), skipping: %v", capture.ID, len(compressed), err)
 		return false
 	}
+	if mp.capturedIDs != nil {
+		mp.capturedIDs[capture.ID] = true
+	}
 	if mp.captureStore != nil {
 		go func(id int, data []byte) {
 			if err := mp.captureStore.Append(id, data); err != nil {
@@ -226,12 +232,29 @@ func (mp *metricsMonitor) getCompressedBytes(id int) ([]byte, bool) {
 // getCaptureByID decompresses and unmarshals a capture by ID.
 // Returns nil if the capture is not found or decompression fails.
 func (mp *metricsMonitor) getCaptureByID(id int) *ReqRespCapture {
-	if mp.captureCache == nil {
-		return nil
-	}
 	data, exists := mp.getCompressedBytes(id)
 	if !exists {
-		return nil
+		if mp.captureStore == nil {
+			return nil
+		}
+		entries, err := mp.captureStore.Load()
+		if err != nil {
+			mp.logger.Warnf("failed to load capture store for fallback: %v", err)
+			return nil
+		}
+		for _, entry := range entries {
+			if entry.ID == id {
+				data = entry.Data
+				exists = true
+				if mp.captureCache != nil {
+					mp.captureCache.Add(id, data)
+				}
+				break
+			}
+		}
+		if !exists {
+			return nil
+		}
 	}
 
 	capture, err := decompressCapture(data)
@@ -243,7 +266,7 @@ func (mp *metricsMonitor) getCaptureByID(id int) *ReqRespCapture {
 	return capture
 }
 
-// getMetrics returns a copy of the current metrics with HasCapture resolved from cache.
+// getMetrics returns a copy of the current metrics with HasCapture resolved from capturedIDs.
 func (mp *metricsMonitor) getMetrics() []ActivityLogEntry {
 	mp.mu.RLock()
 	defer mp.mu.RUnlock()
@@ -252,15 +275,15 @@ func (mp *metricsMonitor) getMetrics() []ActivityLogEntry {
 	if result == nil {
 		return []ActivityLogEntry{}
 	}
-	if mp.captureCache != nil {
+	if mp.capturedIDs != nil {
 		for i := range result {
-			result[i].HasCapture = mp.captureCache.Has(result[i].ID)
+			result[i].HasCapture = mp.capturedIDs[result[i].ID]
 		}
 	}
 	return result
 }
 
-// getMetricsJSON returns metrics as JSON with HasCapture resolved from cache.
+// getMetricsJSON returns metrics as JSON with HasCapture resolved from capturedIDs.
 func (mp *metricsMonitor) getMetricsJSON() ([]byte, error) {
 	mp.mu.RLock()
 	defer mp.mu.RUnlock()
@@ -269,9 +292,9 @@ func (mp *metricsMonitor) getMetricsJSON() ([]byte, error) {
 	if result == nil {
 		return json.Marshal([]ActivityLogEntry{})
 	}
-	if mp.captureCache != nil {
+	if mp.capturedIDs != nil {
 		for i := range result {
-			result[i].HasCapture = mp.captureCache.Has(result[i].ID)
+			result[i].HasCapture = mp.capturedIDs[result[i].ID]
 		}
 	}
 	return json.Marshal(result)
