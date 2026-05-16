@@ -183,7 +183,6 @@ func main() {
 			}
 
 			mainLogger.Debug("Configuration Changed")
-			currentPM.Shutdown()
 			if mon != nil {
 				mon.UpdateConfig(conf.Performance)
 			}
@@ -191,6 +190,9 @@ func main() {
 			newPM.SetVersion(date, commit, version)
 			newPM.SetPerfMonitor(mon)
 			handler.Set(newPM)
+			if currentPM != nil {
+				go currentPM.Shutdown()
+			}
 			mainLogger.Debug("Configuration Reloaded")
 
 			// wait a few seconds and tell any UI to reload

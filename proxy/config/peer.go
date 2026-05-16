@@ -66,6 +66,15 @@ func (c *PeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return fmt.Errorf("peer models can not be empty")
 	}
 
+	peerConfig := PeerConfig(defaults)
+	if err := peerConfig.Validate(); err != nil {
+		return err
+	}
+
 	*c = PeerConfig(defaults)
 	return nil
+}
+
+func (c PeerConfig) Validate() error {
+	return validatePeerConfigFields(c.MaxConcurrent, c.QueueSize, c.QueueTimeout, c.RequestInterval, c.Timeout)
 }

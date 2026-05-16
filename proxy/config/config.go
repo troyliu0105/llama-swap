@@ -693,6 +693,10 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 			}
 		}
 
+		if err := peerConfig.Validate(); err != nil {
+			return Config{}, fmt.Errorf("peers.%s: %w", peerName, err)
+		}
+
 		config.Peers[peerName] = peerConfig
 	}
 

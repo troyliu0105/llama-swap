@@ -121,6 +121,8 @@ func (s *AuditStore) RecordRequest(metricID int, apiKey, userName, model, reqPat
 }
 
 func (s *AuditStore) configureDB() error {
+	s.db.SetMaxOpenConns(1)
+
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",

@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func newTestAuditStore(t *testing.T, retentionDays int, captureFlushSize int) (*AuditStore, string) {
@@ -235,10 +236,27 @@ func TestComputeFingerprint_Messages_SystemArray(t *testing.T) {
 	body := []byte(`{"system":[{"type":"text","text":"Part one"},{"type":"text","text":"Part two"},{"type":"image","source":"ignored"}],"messages":[{"role":"user","content":[{"type":"text","text":"Hello"}]}]}`)
 
 	fp := ComputeFingerprint("/v1/messages", body)
-	fp2 := ComputeFingerprint("/v1/messages", []byte(`{"system":"Part onePart two","messages":[{"role":"user","content":"Hello"}]}`))
+	fp2 := ComputeFingerprint("/v1/messages", []byte(`{"system":"Part one\u0000Part two","messages":[{"role":"user","content":"Hello"}]}`))
 
 	assert.NotEmpty(t, fp)
 	assert.Equal(t, fp, fp2)
+}
+
+func TestComputeFingerprint_ChatCompletions_UsesAllMessages(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"system","content":"sys-1"},{"role":"user","content":"user-1"},{"role":"system","content":"sys-2"},{"role":"user","content":"user-2"}]}`)
+	differentBody := []byte(`{"messages":[{"role":"system","content":"sys-1"},{"role":"user","content":"user-1"},{"role":"system","content":"sys-3"},{"role":"user","content":"user-2"}]}`)
+
+	fp := ComputeFingerprint("/v1/chat/completions", body)
+	fp2 := ComputeFingerprint("/v1/chat/completions", differentBody)
+
+	assert.NotEqual(t, fp, fp2)
+}
+
+func TestContentString_ArrayDelimiter(t *testing.T) {
+	first := contentString(gjson.Parse(`[{"text":"ab"},{"text":"c"}]`))
+	second := contentString(gjson.Parse(`[{"text":"a"},{"text":"bc"}]`))
+
+	assert.NotEqual(t, first, second)
 }
 
 func TestComputeFingerprint_Completions(t *testing.T) {
@@ -304,19 +322,41 @@ func TestAuditStore_CaptureSessionDedup(t *testing.T) {
 	require.NoError(t, store.flushCaptures([]captureBatchItem{second}))
 
 	assert.Equal(t, 1, queryInt(t, store.db, `SELECT COUNT(*) FROM sessions`))
-	assert.Equal(t, 1, queryInt(t, store.db, `SELECT COUNT(*) FROM captures`))
+	assert.Equal(t, 2, queryInt(t, store.db, `SELECT COUNT(*) FROM captures`))
 
-	var model, reqPath string
-	var seqNum int
-	var data []byte
-	require.NoError(t, store.db.QueryRow(`
+	rows, err := store.db.Query(`
 		SELECT s.model, s.req_path, c.seq_num, c.data
 		FROM captures c JOIN sessions s ON s.id = c.session_id
-	`).Scan(&model, &reqPath, &seqNum, &data))
-	assert.Equal(t, "model-b", model)
-	assert.Equal(t, "/v1/responses", reqPath)
-	assert.Equal(t, 2, seqNum)
-	assert.Equal(t, []byte(`second`), data)
+		ORDER BY c.seq_num ASC
+	`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	type captureRow struct {
+		model   string
+		reqPath string
+		seqNum  int
+		data    []byte
+	}
+	var results []captureRow
+	for rows.Next() {
+		var r captureRow
+		require.NoError(t, rows.Scan(&r.model, &r.reqPath, &r.seqNum, &r.data))
+		results = append(results, r)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, results, 2)
+
+	// Both captures are preserved (no overwrite), each with its own seq_num
+	assert.Equal(t, 1, results[0].seqNum)
+	assert.Equal(t, []byte(`first`), results[0].data)
+
+	assert.Equal(t, 2, results[1].seqNum)
+	assert.Equal(t, []byte(`second`), results[1].data)
+
+	// Session metadata reflects the latest capture's model/reqPath (upsert behavior)
+	assert.Equal(t, "model-b", results[1].model)
+	assert.Equal(t, "/v1/responses", results[1].reqPath)
 }
 
 func TestAuditStore_CaptureOnlyForChatEndpoints(t *testing.T) {

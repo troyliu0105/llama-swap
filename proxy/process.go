@@ -743,6 +743,7 @@ func (p *Process) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		isChatCompletions := strings.HasPrefix(r.URL.Path, "/v1/chat/completions")
 		if p.config.SendLoadingState != nil && *p.config.SendLoadingState && isStreaming && isChatCompletions {
 			srw = newStatusResponseWriter(p, w)
+			srw.wg.Add(1)
 			go srw.statusUpdates(swapCtx)
 		} else {
 			p.proxyLogger.Debugf("<%s> SendLoadingState is nil or false, not streaming loading state", p.ID)
@@ -976,7 +977,6 @@ func newStatusResponseWriter(p *Process, w http.ResponseWriter) *statusResponseW
 
 // statusUpdates sends status updates to the client while the model is loading
 func (s *statusResponseWriter) statusUpdates(ctx context.Context) {
-	s.wg.Add(1)
 	defer s.wg.Done()
 
 	// Recover from panics caused by client disconnection

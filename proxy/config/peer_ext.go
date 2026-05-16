@@ -107,6 +107,26 @@ func (c *ExtendedPeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) er
 		}
 	}
 
-	*c = ExtendedPeerConfig(defaults)
+	peerConfig := ExtendedPeerConfig(defaults)
+	if err := peerConfig.Validate(); err != nil {
+		return err
+	}
+
+	*c = peerConfig
+	return nil
+}
+
+func (c ExtendedPeerConfig) Validate() error {
+	if err := validatePeerConfigFields(c.MaxConcurrent, c.QueueSize, c.QueueTimeout, c.RequestInterval, c.Timeout); err != nil {
+		return err
+	}
+	if c.Type == "codex" {
+		if c.Codex == nil {
+			return fmt.Errorf("codex config is required when type is codex")
+		}
+		if err := c.Codex.Validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }

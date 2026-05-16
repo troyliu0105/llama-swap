@@ -26,7 +26,10 @@ const (
 
 	tokenExpiryLeeway            = 120 // seconds before actual expiry to consider expired
 	oauthPollingSafetyMarginSecs = 3   // extra wait on top of interval (matches OpenCode)
+	httpTimeout                  = 30 * time.Second
 )
+
+var httpClient = &http.Client{Timeout: httpTimeout}
 
 // OpenCodeUserAgent returns the User-Agent string matching OpenCode's format.
 func OpenCodeUserAgent() string {
@@ -110,6 +113,7 @@ type AuthStore struct {
 	filePath  string
 	tokens    map[string]*TokenData
 	refreshMu map[string]*sync.Mutex
+	deleted   map[string]bool
 }
 
 func DefaultAuthPath() string {
@@ -125,6 +129,7 @@ func NewAuthStore(filePath string) *AuthStore {
 		filePath:  filePath,
 		tokens:    make(map[string]*TokenData),
 		refreshMu: make(map[string]*sync.Mutex),
+		deleted:   make(map[string]bool),
 	}
 }
 
@@ -214,6 +219,10 @@ func (s *AuthStore) GetToken(accountName string) (*TokenData, error) {
 
 func (s *AuthStore) SetToken(accountName string, token *TokenData) error {
 	s.mu.Lock()
+	if s.deleted[accountName] {
+		s.mu.Unlock()
+		return fmt.Errorf("codex account %q has been removed", accountName)
+	}
 	s.tokens[accountName] = token
 	s.mu.Unlock()
 
@@ -233,6 +242,12 @@ func (s *AuthStore) ListAccounts() []string {
 }
 
 func (s *AuthStore) RemoveToken(accountName string) error {
+	// Hold the per-account refresh mutex to prevent a concurrent refresh
+	// from writing back the token after deletion (no "token resurrection").
+	refreshMu := s.getRefreshMutex(accountName)
+	refreshMu.Lock()
+	defer refreshMu.Unlock()
+
 	s.mu.Lock()
 	_, ok := s.tokens[accountName]
 	if !ok {
@@ -240,6 +255,7 @@ func (s *AuthStore) RemoveToken(accountName string) error {
 		return fmt.Errorf("codex account %q not found", accountName)
 	}
 	delete(s.tokens, accountName)
+	s.deleted[accountName] = true
 	s.mu.Unlock()
 
 	return s.Save()
@@ -280,12 +296,19 @@ func (s *AuthStore) GetValidToken(accountName string) (*TokenData, error) {
 		return token, nil
 	}
 
-	newToken, err := refreshToken(token.RefreshToken)
+	newToken, err := refreshToken(context.Background(), token.RefreshToken)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"codex account %q token expired, run: llama-swap codex-login --account %s",
 			accountName, accountName,
 		)
+	}
+
+	s.mu.RLock()
+	isDeleted := s.deleted[accountName]
+	s.mu.RUnlock()
+	if isDeleted {
+		return nil, fmt.Errorf("codex account %q has been removed", accountName)
 	}
 
 	if err := s.SetToken(accountName, newToken); err != nil {
@@ -295,20 +318,23 @@ func (s *AuthStore) GetValidToken(accountName string) (*TokenData, error) {
 	return newToken, nil
 }
 
-func refreshToken(refreshTokenStr string) (*TokenData, error) {
+func refreshToken(ctx context.Context, refreshTokenStr string) (*TokenData, error) {
+	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
+	defer cancel()
+
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refreshTokenStr},
 		"client_id":     {ClientID},
 	}
 
-	req, err := http.NewRequest("POST", IssuerURL+"/oauth/token", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", IssuerURL+"/oauth/token", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("codex auth: failed to create refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("codex auth: refresh request failed: %w", err)
 	}
@@ -353,7 +379,7 @@ func StartDeviceAuth(ctx context.Context) (*DeviceAuthResponse, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", OpenCodeUserAgent())
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("codex auth: device auth request failed: %w", err)
 	}
@@ -405,7 +431,7 @@ func PollDeviceAuth(ctx context.Context, deviceAuth *DeviceAuthResponse) (*Token
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", OpenCodeUserAgent())
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("codex auth: poll request failed: %w", err)
 		}
@@ -461,7 +487,7 @@ func exchangeAuthToken(ctx context.Context, code, codeVerifier string) (*TokenDa
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("codex auth: token exchange request failed: %w", err)
 	}

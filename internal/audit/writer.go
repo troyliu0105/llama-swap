@@ -130,8 +130,8 @@ func (s *AuditStore) handleAuditEvent(event auditEvent) (captureBatchItem, bool)
 func (s *AuditStore) ensureUserTx(tx *sql.Tx, apiKey, userName string) (int64, error) {
 	if _, err := tx.Exec(`
 		INSERT INTO users (api_key, name) VALUES (?, ?)
-		ON CONFLICT(api_key) DO UPDATE SET name = excluded.name
-	`, apiKey, userName); err != nil {
+		ON CONFLICT(api_key) DO UPDATE SET name = CASE WHEN ? != '' THEN ? ELSE users.name END
+	`, apiKey, userName, userName, userName); err != nil {
 		return 0, fmt.Errorf("upsert user: %w", err)
 	}
 
@@ -181,8 +181,8 @@ func (s *AuditStore) flushCaptures(items []captureBatchItem) error {
 		}
 
 		if _, flushErr = tx.Exec(`
-			INSERT OR REPLACE INTO captures (session_id, request_log_id, seq_num, data)
-			VALUES (?, ?, COALESCE((SELECT seq_num FROM captures WHERE session_id = ?), 0) + 1, ?)
+			INSERT INTO captures (session_id, request_log_id, seq_num, data)
+			VALUES (?, ?, (SELECT COALESCE(MAX(seq_num), 0) + 1 FROM captures WHERE session_id = ?), ?)
 		`, sessionID, item.requestLogID, sessionID, item.captureData); flushErr != nil {
 			err = fmt.Errorf("insert capture: %w", flushErr)
 			return err

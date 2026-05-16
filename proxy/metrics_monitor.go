@@ -454,10 +454,12 @@ func (mp *metricsMonitor) wrapHandler(
 		}
 		if mp.auditStore != nil {
 			tm.HasCapture = true
+			mp.mu.Lock()
 			if mp.capturedIDs == nil {
 				mp.capturedIDs = make(map[int]bool)
 			}
 			mp.capturedIDs[metricID] = true
+			mp.mu.Unlock()
 		}
 	}
 

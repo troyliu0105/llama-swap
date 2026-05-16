@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -37,7 +38,7 @@ func ComputeFingerprint(reqPath string, body []byte) string {
 		return randomFingerprint()
 	}
 
-	return hashString(systemPart + userPart)
+	return hashString(fmt.Sprintf("sys:%d:%s\x00usr:%d:%s", len(systemPart), systemPart, len(userPart), userPart))
 }
 
 func IsChatEndpoint(reqPath string) bool {
@@ -58,21 +59,23 @@ func randomFingerprint() string {
 }
 
 func extractSystemFromMessages(body []byte) string {
+	parts := make([]string, 0)
 	for _, message := range gjson.GetBytes(body, "messages").Array() {
 		if message.Get("role").String() == "system" {
-			return contentString(message.Get("content"))
+			parts = append(parts, contentString(message.Get("content")))
 		}
 	}
-	return ""
+	return strings.Join(parts, "\x00")
 }
 
 func extractFirstUserFromMessages(body []byte) string {
+	parts := make([]string, 0)
 	for _, message := range gjson.GetBytes(body, "messages").Array() {
 		if message.Get("role").String() == "user" {
-			return contentString(message.Get("content"))
+			parts = append(parts, contentString(message.Get("content")))
 		}
 	}
-	return ""
+	return strings.Join(parts, "\x00")
 }
 
 func extractInstructions(body []byte) string {
@@ -82,12 +85,13 @@ func extractInstructions(body []byte) string {
 func extractFirstUserFromInput(body []byte) string {
 	input := gjson.GetBytes(body, "input")
 	if input.IsArray() {
+		parts := make([]string, 0)
 		for _, item := range input.Array() {
 			if item.Get("role").String() == "user" {
-				return contentString(item.Get("content"))
+				parts = append(parts, contentString(item.Get("content")))
 			}
 		}
-		return ""
+		return strings.Join(parts, "\x00")
 	}
 	return contentString(input)
 }
@@ -104,7 +108,7 @@ func extractSystemTopLevel(body []byte) string {
 				}
 			}
 		}
-		return strings.Join(parts, "")
+		return strings.Join(parts, "\x00")
 	}
 	return contentString(system)
 }
@@ -149,7 +153,7 @@ func contentString(value gjson.Result) string {
 				parts = append(parts, item.String())
 			}
 		}
-		return strings.Join(parts, "")
+		return strings.Join(parts, "\x00")
 	}
 	return value.String()
 }

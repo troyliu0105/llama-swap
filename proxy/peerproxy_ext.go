@@ -107,6 +107,7 @@ type enhancedPeerMember struct {
 	logger        *logmon.Monitor
 	stopCh        chan struct{}
 	codexProxy    *codex.Proxy
+	stopped       atomic.Bool
 
 	backoffMu       sync.Mutex
 	lastRequestMu   sync.Mutex
@@ -427,10 +428,18 @@ func (p *EnhancedPeerProxy) GetOriginalModelName(modelID string) string {
 }
 
 func (p *EnhancedPeerProxy) Shutdown() {
+	seen := make(map[*enhancedPeerMember]struct{})
 	for _, pp := range p.proxyMap {
+		if _, ok := seen[pp]; ok {
+			continue
+		}
+		seen[pp] = struct{}{}
+		pp.stopped.Store(true)
 		if pp.stopCh != nil {
 			close(pp.stopCh)
+			pp.stopCh = nil
 		}
+		pp.queue = nil
 		if pp.codexProxy != nil {
 			pp.codexProxy.Close()
 		}
@@ -441,6 +450,9 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 	pp, found := p.proxyMap[modelID]
 	if !found {
 		return fmt.Errorf("no peer proxy found for model %s", modelID)
+	}
+	if pp.stopped.Load() {
+		return fmt.Errorf("peer proxy for model %s is shutting down", modelID)
 	}
 
 	ctx := context.WithValue(request.Context(), peerCtxKey{}, &peerRequestInfo{
@@ -611,6 +623,8 @@ func (pp *enhancedPeerMember) markRequestComplete() {
 
 // processQueue processes queued requests in a goroutine
 func (pp *enhancedPeerMember) processQueue() {
+	queue := pp.queue
+	stopCh := pp.stopCh
 	defer func() {
 		if r := recover(); r != nil {
 			pp.logger.Warnf("peer %s: processQueue panic recovered: %v", pp.peerID, r)
@@ -619,7 +633,7 @@ func (pp *enhancedPeerMember) processQueue() {
 
 	for {
 		select {
-		case req := <-pp.queue:
+		case req := <-queue:
 			go func(qr *queuedRequest) {
 				defer func() {
 					if r := recover(); r != nil {
@@ -679,9 +693,9 @@ func (pp *enhancedPeerMember) processQueue() {
 				}
 				close(qr.done)
 			}(req)
-		case <-pp.stopCh:
-			for len(pp.queue) > 0 {
-				req := <-pp.queue
+		case <-stopCh:
+			for len(queue) > 0 {
+				req := <-queue
 				atomic.AddInt32(&pp.waitingCount, -1)
 				if req.responded.CompareAndSwap(false, true) {
 					http.Error(req.writer, "server shutting down", http.StatusServiceUnavailable)
@@ -696,6 +710,10 @@ func (pp *enhancedPeerMember) processQueue() {
 // serveWithConcurrencyControl handles request concurrency with semaphore and queue.
 // During backoff, requests are serialized via serveSerialized instead.
 func (pp *enhancedPeerMember) serveWithConcurrencyControl(writer http.ResponseWriter, request *http.Request) serveResult {
+	if pp.stopped.Load() {
+		http.Error(writer, "peer proxy is shutting down", http.StatusServiceUnavailable)
+		return serveHandled
+	}
 	if pp.maxConcurrent == 0 {
 		return serveContinue
 	}
@@ -724,6 +742,11 @@ func (pp *enhancedPeerMember) serveWithConcurrencyControl(writer http.ResponseWr
 	}
 
 	atomic.AddInt32(&pp.waitingCount, 1)
+	if pp.stopped.Load() {
+		atomic.AddInt32(&pp.waitingCount, -1)
+		http.Error(writer, "peer proxy is shutting down", http.StatusServiceUnavailable)
+		return serveHandled
+	}
 	done := make(chan struct{}, 1)
 	qr := &queuedRequest{
 		writer:  writer,
