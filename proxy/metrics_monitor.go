@@ -385,6 +385,11 @@ func (mp *metricsMonitor) wrapHandler(
 			usage := parsed.Get("usage")
 			timings := parsed.Get("timings")
 
+			// v1/responses nests usage under "response.usage"
+			if !usage.Exists() {
+				usage = parsed.Get("response.usage")
+			}
+
 			// extract timings for infill - response is an array, timings are in the last element
 			// see #463
 			if strings.HasPrefix(request.URL.Path, "/infill") {
@@ -462,7 +467,7 @@ func (mp *metricsMonitor) recordAudit(apiKey, reqPath string, reqBody []byte, tm
 		return
 	}
 	validMetrics := tm.Tokens.InputTokens > 0 || tm.Tokens.OutputTokens > 0
-	if !validMetrics && tm.RespStatusCode == http.StatusOK {
+	if !validMetrics && capture == nil && tm.RespStatusCode == http.StatusOK {
 		return
 	}
 
