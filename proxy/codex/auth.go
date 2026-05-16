@@ -24,8 +24,8 @@ const (
 	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
 	CodexAPIURL = "https://chatgpt.com/backend-api/codex/responses"
 
-	tokenExpiryLeeway            = 120  // seconds before actual expiry to consider expired
-	oauthPollingSafetyMarginSecs = 3    // extra wait on top of interval (matches OpenCode)
+	tokenExpiryLeeway            = 120 // seconds before actual expiry to consider expired
+	oauthPollingSafetyMarginSecs = 3   // extra wait on top of interval (matches OpenCode)
 )
 
 // OpenCodeUserAgent returns the User-Agent string matching OpenCode's format.
@@ -420,7 +420,7 @@ func PollDeviceAuth(ctx context.Context, deviceAuth *DeviceAuthResponse) (*Token
 			// Got authorization_code + code_verifier, now exchange for real tokens
 			var authCode struct {
 				AuthorizationCode string `json:"authorization_code"`
-				CodeVerifier       string `json:"code_verifier"`
+				CodeVerifier      string `json:"code_verifier"`
 			}
 			if err := json.Unmarshal(respBody, &authCode); err != nil {
 				return nil, fmt.Errorf("codex auth: failed to parse authorization code response: %w", err)
