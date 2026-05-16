@@ -540,6 +540,13 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 			peerConfig.ApiKey = strings.ReplaceAll(peerConfig.ApiKey, macroSlug, macroStr)
 			peerConfig.Filters.StripParams = strings.ReplaceAll(peerConfig.Filters.StripParams, macroSlug, macroStr)
 
+			// Substitute macros in codex account names
+			if peerConfig.Codex != nil {
+				for j := range peerConfig.Codex.Accounts {
+					peerConfig.Codex.Accounts[j].Name = strings.ReplaceAll(peerConfig.Codex.Accounts[j].Name, macroSlug, macroStr)
+				}
+			}
+
 			// Substitute in setParams (type-preserving)
 			if len(peerConfig.Filters.SetParams) > 0 {
 				result, err := substituteMacroInValue(peerConfig.Filters.SetParams, entry.Name, entry.Value)
@@ -562,6 +569,19 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 				return Config{}, err
 			}
 		}
+
+		// Codex peer validation after macro substitution
+		if peerConfig.Type == "codex" {
+			if peerConfig.Codex == nil {
+				return Config{}, fmt.Errorf("peers.%s: codex config is required when type is codex", peerName)
+			}
+			for i, acct := range peerConfig.Codex.Accounts {
+				if matches := macroPatternRegex.FindAllStringSubmatch(acct.Name, -1); len(matches) > 0 {
+					return Config{}, fmt.Errorf("peers.%s.codex.accounts[%d].name: unknown macro '${%s}'", peerName, i, matches[0][1])
+				}
+			}
+		}
+
 		config.Peers[peerName] = peerConfig
 	}
 
