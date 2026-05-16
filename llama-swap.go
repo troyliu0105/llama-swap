@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,6 +23,24 @@ import (
 	"github.com/mostlygeek/llama-swap/proxy/config"
 	"github.com/mostlygeek/llama-swap/proxy/configwatcher"
 )
+
+type atomicHandler struct {
+	handler atomic.Pointer[proxy.ProxyManager]
+}
+
+func (ah *atomicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h := ah.handler.Load(); h != nil {
+		h.ServeHTTP(w, r)
+	}
+}
+
+func (ah *atomicHandler) Set(pm *proxy.ProxyManager) {
+	ah.handler.Store(pm)
+}
+
+func (ah *atomicHandler) Get() *proxy.ProxyManager {
+	return ah.handler.Load()
+}
 
 var (
 	version string = "0"
@@ -129,9 +148,12 @@ func main() {
 	// Context that bounds the lifetime of background watcher goroutines.
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 
-	// Create server with initial handlergit
+	handler := &atomicHandler{}
+
+	// Create server with initial handler
 	srv := &http.Server{
-		Addr: *listenStr,
+		Addr:    *listenStr,
+		Handler: handler,
 	}
 
 	// Support for watching config and reloading when it changes
@@ -151,7 +173,8 @@ func main() {
 			reloadMutex.Unlock()
 		}()
 
-		if currentPM, ok := srv.Handler.(*proxy.ProxyManager); ok {
+		currentPM := handler.Get()
+		if currentPM != nil {
 			mainLogger.Info("Reloading Configuration")
 			conf, err = config.LoadConfig(*configPath)
 			if err != nil {
@@ -167,7 +190,7 @@ func main() {
 			newPM := proxy.New(conf)
 			newPM.SetVersion(date, commit, version)
 			newPM.SetPerfMonitor(mon)
-			srv.Handler = newPM
+			handler.Set(newPM)
 			mainLogger.Debug("Configuration Reloaded")
 
 			// wait a few seconds and tell any UI to reload
@@ -185,7 +208,7 @@ func main() {
 			newPM := proxy.New(conf)
 			newPM.SetVersion(date, commit, version)
 			newPM.SetPerfMonitor(mon)
-			srv.Handler = newPM
+			handler.Set(newPM)
 		}
 	}
 
@@ -227,10 +250,10 @@ func main() {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 				defer cancel()
 
-				if pm, ok := srv.Handler.(*proxy.ProxyManager); ok {
+				if pm := handler.Get(); pm != nil {
 					pm.Shutdown()
 				} else {
-					mainLogger.Error("srv.Handler is not of type *proxy.ProxyManager")
+					mainLogger.Error("handler has no ProxyManager")
 				}
 
 				if err := srv.Shutdown(ctx); err != nil {
