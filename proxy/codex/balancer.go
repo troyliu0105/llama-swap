@@ -38,112 +38,213 @@ func (s *AccountStats) CacheHits() int64 {
 	return s.cacheHits.Load()
 }
 
-// Balancer selects accounts for Codex requests using cache-hit affinity.
+// Per-model state for sticky routing.
+type modelState struct {
+	account    string
+	failCount  int
+	lastFailAt map[string]time.Time
+}
+
+// Balancer selects accounts for Codex requests.
 //
-// Strategy "cache-hit" (default):
-//   - Maintains model→account affinity: once a model is routed to an account,
-//     it stays there to maximize prompt cache reuse.
-//   - For new models without affinity, selects the account with the highest
-//     cache-hit rate. Ties broken by fewest total requests.
-//   - Falls back to round-robin when no accounts have stats yet.
-//
-// Strategy "round-robin":
-//   - Simple round-robin across all accounts.
+// Strategy "sticky" (default) keeps each model on a single account and fails
+// that model over independently after repeated failures. "cache-hit" is kept as
+// an alias for sticky routing because the sticky behavior preserves cache reuse.
+// Strategy "round-robin" remains simple round-robin across all accounts.
 type Balancer struct {
 	mu       sync.RWMutex
-	accounts []string // account names in config order
+	accounts []string
 	stats    map[string]*AccountStats
 
-	// model→account affinity for sticky routing.
-	affinity  map[string]string // model → account name
-	strategy  string            // "cache-hit" or "round-robin"
-	rrCounter atomic.Uint64     // round-robin counter
+	models   map[string]*modelState
+	strategy string
+	maxFails int
+	cooldown time.Duration
+
+	rrCounter atomic.Uint64
 }
 
 // NewBalancer creates a Balancer for the given accounts and strategy.
-// strategy must be "cache-hit" or "round-robin". Empty defaults to "cache-hit".
+// Empty and "cache-hit" both default to sticky routing.
 func NewBalancer(accounts []string, strategy string) *Balancer {
 	stats := make(map[string]*AccountStats, len(accounts))
 	for _, name := range accounts {
 		stats[name] = &AccountStats{}
 	}
-	if strategy == "" {
-		strategy = "cache-hit"
+	if strategy == "" || strategy == "cache-hit" {
+		strategy = "sticky"
 	}
 	return &Balancer{
-		accounts: accounts,
+		accounts: append([]string(nil), accounts...),
 		stats:    stats,
-		affinity: make(map[string]string),
+		models:   make(map[string]*modelState),
 		strategy: strategy,
+		maxFails: 3,
+		cooldown: 5 * time.Minute,
 	}
 }
 
 // Select picks the best account for a request to the given model.
 func (b *Balancer) Select(model string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	if len(b.accounts) == 0 {
 		return "", fmt.Errorf("no codex accounts available")
-	}
-	if len(b.accounts) == 1 {
-		return b.accounts[0], nil
 	}
 
 	switch b.strategy {
 	case "round-robin":
-		return b.selectRoundRobin(), nil
+		return b.selectRoundRobinLocked(), nil
 	default:
-		return b.selectCacheHit(model), nil
+		return b.selectStickyLocked(model), nil
 	}
 }
 
-// selectCacheHit uses model affinity + cache-hit rate for selection.
-func (b *Balancer) selectCacheHit(model string) string {
-	b.mu.RLock()
-	if preferred, ok := b.affinity[model]; ok {
-		if _, exists := b.stats[preferred]; exists {
-			b.mu.RUnlock()
-			return preferred
-		}
+func (b *Balancer) selectStickyLocked(model string) string {
+	state := b.models[model]
+	if state == nil {
+		state = &modelState{lastFailAt: make(map[string]time.Time)}
+		b.models[model] = state
 	}
-	b.mu.RUnlock()
 
-	// Select by highest cache-hit rate, tie-break by fewest requests
-	var best string
-	var bestRate float64 = -1
-	var bestTotal int64
-
-	for _, name := range b.accounts {
-		s := b.stats[name]
-		rate := s.CacheHitRate()
-		total := s.TotalRequests()
-
-		if rate > bestRate || (rate == bestRate && total < bestTotal) {
-			best = name
-			bestRate = rate
-			bestTotal = total
+	now := time.Now()
+	if state.account != "" {
+		if _, exists := b.stats[state.account]; !exists {
+			state.account = ""
+			state.failCount = 0
+		} else if state.failCount < b.maxFails {
+			return state.account
+		} else if !b.inCooldownLocked(state, state.account, now) {
+			state.failCount = 0
+			return state.account
 		}
 	}
 
-	// If no account has stats yet (all rates = 0), use round-robin
-	if bestRate == 0 && bestTotal == 0 {
-		best = b.selectRoundRobin()
+	selected := b.nextAvailableAccountLocked(state, now)
+	if selected == "" {
+		selected = b.earliestCooldownAccountLocked(state)
 	}
-
-	// Set affinity for this model
-	b.mu.Lock()
-	b.affinity[model] = best
-	b.mu.Unlock()
-
-	return best
+	state.account = selected
+	state.failCount = 0
+	return selected
 }
 
-func (b *Balancer) selectRoundRobin() string {
+func (b *Balancer) selectRoundRobinLocked() string {
 	n := b.rrCounter.Add(1)
 	return b.accounts[(n-1)%uint64(len(b.accounts))]
 }
 
+func (b *Balancer) nextAvailableAccountLocked(state *modelState, now time.Time) string {
+	start := 0
+	if state.account != "" {
+		if index := b.accountIndexLocked(state.account); index >= 0 {
+			start = (index + 1) % len(b.accounts)
+		} else {
+			start = int((b.rrCounter.Add(1) - 1) % uint64(len(b.accounts)))
+		}
+	} else {
+		start = int((b.rrCounter.Add(1) - 1) % uint64(len(b.accounts)))
+	}
+
+	for i := 0; i < len(b.accounts); i++ {
+		account := b.accounts[(start+i)%len(b.accounts)]
+		if !b.inCooldownLocked(state, account, now) {
+			return account
+		}
+	}
+	return ""
+}
+
+func (b *Balancer) earliestCooldownAccountLocked(state *modelState) string {
+	selected := b.accounts[0]
+	selectedExpiry := time.Time{}
+	for _, account := range b.accounts {
+		lastFail, ok := state.lastFailAt[account]
+		if !ok {
+			return account
+		}
+		expiry := lastFail.Add(b.cooldown)
+		if selectedExpiry.IsZero() || expiry.Before(selectedExpiry) {
+			selected = account
+			selectedExpiry = expiry
+		}
+	}
+	return selected
+}
+
+func (b *Balancer) accountIndexLocked(account string) int {
+	for i, name := range b.accounts {
+		if name == account {
+			return i
+		}
+	}
+	return -1
+}
+
+func (b *Balancer) inCooldownLocked(state *modelState, account string, now time.Time) bool {
+	lastFail, ok := state.lastFailAt[account]
+	if !ok || b.cooldown <= 0 {
+		return false
+	}
+	return now.Before(lastFail.Add(b.cooldown))
+}
+
+// RecordSuccess clears consecutive failures for the model/account pair.
+func (b *Balancer) RecordSuccess(model, account string) {
+	if account == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, exists := b.stats[account]; !exists {
+		return
+	}
+	state := b.models[model]
+	if state == nil {
+		state = &modelState{account: account, lastFailAt: make(map[string]time.Time)}
+		b.models[model] = state
+	}
+	delete(state.lastFailAt, account)
+	if state.account == "" || state.account == account {
+		state.account = account
+		state.failCount = 0
+	}
+}
+
+// RecordFailure increments consecutive failures for the current model account.
+func (b *Balancer) RecordFailure(model, account string) {
+	if account == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, exists := b.stats[account]; !exists {
+		return
+	}
+	state := b.models[model]
+	if state == nil {
+		state = &modelState{account: account, lastFailAt: make(map[string]time.Time)}
+		b.models[model] = state
+	}
+	if state.account == "" {
+		state.account = account
+	}
+	if state.account != account {
+		return
+	}
+	state.failCount++
+	if state.failCount >= b.maxFails {
+		state.lastFailAt[account] = time.Now()
+	}
+}
+
 // RecordResult records the outcome of a request for future load balancing.
 func (b *Balancer) RecordResult(account string, cacheHit bool) {
-	if s, ok := b.stats[account]; ok {
+	b.mu.RLock()
+	s, ok := b.stats[account]
+	b.mu.RUnlock()
+	if ok {
 		s.RecordRequest(cacheHit)
 	}
 }
@@ -151,7 +252,10 @@ func (b *Balancer) RecordResult(account string, cacheHit bool) {
 // RecordRequestOnly increments the request counter without a cache-hit sample.
 // Use for streaming responses where cache status cannot be determined.
 func (b *Balancer) RecordRequestOnly(account string) {
-	if s, ok := b.stats[account]; ok {
+	b.mu.RLock()
+	s, ok := b.stats[account]
+	b.mu.RUnlock()
+	if ok {
 		s.totalReqs.Add(1)
 		s.lastUsedUnix.Store(time.Now().Unix())
 	}
@@ -187,7 +291,7 @@ func (b *Balancer) Stats() []AccountStatsSnapshot {
 // Useful when an account is removed or tokens are refreshed.
 func (b *Balancer) ResetAffinity() {
 	b.mu.Lock()
-	b.affinity = make(map[string]string)
+	b.models = make(map[string]*modelState)
 	b.mu.Unlock()
 }
 
@@ -203,10 +307,10 @@ func (b *Balancer) RemoveAccount(name string) {
 			break
 		}
 	}
-	// Clear affinity entries pointing to removed account
-	for model, acc := range b.affinity {
-		if acc == name {
-			delete(b.affinity, model)
+	for model, state := range b.models {
+		delete(state.lastFailAt, name)
+		if state.account == name {
+			delete(b.models, model)
 		}
 	}
 }

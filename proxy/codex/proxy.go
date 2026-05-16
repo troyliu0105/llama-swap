@@ -119,18 +119,32 @@ func (p *Proxy) stripProxyHeaders(req *http.Request) {
 	req.Header.Del("Via")
 }
 
-func (p *Proxy) RecordResponse(account string, statusCode int, responseBody []byte) {
+func (p *Proxy) RecordResponse(model, account string, statusCode int, responseBody []byte) {
 	cacheHit := detectCacheHit(responseBody)
 	p.balancer.RecordResult(account, cacheHit)
+	if isFailureStatus(statusCode) {
+		p.balancer.RecordFailure(model, account)
+	} else {
+		p.balancer.RecordSuccess(model, account)
+	}
 
 	size := len(responseBody)
-	model := extractModelFromContext(responseBody)
 	p.logger("[CODEX] ◀ %s | %s | %d | %s | cache=%v\n", account, model, statusCode, humanSize(size), cacheHit)
 }
 
-func (p *Proxy) RecordStreamingResponse(account string, statusCode int) {
+func (p *Proxy) RecordStreamingResponse(model, account string, statusCode int) {
 	p.balancer.RecordRequestOnly(account)
-	p.logger("[CODEX] ◀ %s | unknown | %d SSE | %s\n", account, statusCode, p.peerID)
+	if isFailureStatus(statusCode) {
+		p.balancer.RecordFailure(model, account)
+	} else {
+		p.balancer.RecordSuccess(model, account)
+	}
+	p.logger("[CODEX] ◀ %s | %s | %d SSE | %s\n", account, model, statusCode, p.peerID)
+}
+
+func (p *Proxy) RecordError(model, account string) {
+	p.balancer.RecordFailure(model, account)
+	p.logger("[CODEX] ✗ %s | %s | connection_error\n", account, model)
 }
 
 func (p *Proxy) GetTransport() *http.Transport {
@@ -175,18 +189,8 @@ func detectCacheHit(body []byte) bool {
 	return resp.Usage.PromptTokensDetails.CachedTokens > 0
 }
 
-// extractModelFromContext tries to pull the model name from a JSON response body.
-func extractModelFromContext(body []byte) string {
-	if len(body) == 0 || !bytes.Contains(body, []byte(`"model"`)) {
-		return "unknown"
-	}
-	var partial struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &partial); err != nil || partial.Model == "" {
-		return "unknown"
-	}
-	return partial.Model
+func isFailureStatus(statusCode int) bool {
+	return statusCode >= 500 || statusCode == http.StatusTooManyRequests
 }
 
 func humanSize(size int) string {

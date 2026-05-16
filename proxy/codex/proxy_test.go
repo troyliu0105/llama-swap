@@ -160,6 +160,49 @@ func TestProxy_DetectCacheHit(t *testing.T) {
 	}
 }
 
+func TestProxy_RecordResponse_RecordsSuccessAndFailure(t *testing.T) {
+	p := newTestProxy(t, []string{"acct1", "acct2"})
+	p.balancer = NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	account, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+
+	p.RecordResponse("model-a", account, http.StatusOK, []byte(`{"usage":{"prompt_tokens_details":{"cached_tokens":1}}}`))
+	stats := p.Stats()
+	require.Len(t, stats, 2)
+	assert.Equal(t, int64(1), stats[0].TotalReqs)
+	assert.Equal(t, int64(1), stats[0].CacheHits)
+
+	for i := 0; i < p.balancer.maxFails; i++ {
+		p.RecordResponse("model-a", account, http.StatusInternalServerError, nil)
+	}
+
+	selected, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+	assert.NotEqual(t, account, selected)
+}
+
+func TestProxy_RecordStreamingResponseAndError_RecordFailures(t *testing.T) {
+	p := newTestProxy(t, []string{"acct1", "acct2"})
+	p.balancer = NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	account, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+
+	p.RecordStreamingResponse("model-a", account, http.StatusOK)
+	stats := p.Stats()
+	require.Len(t, stats, 2)
+	assert.Equal(t, int64(1), stats[0].TotalReqs)
+
+	for i := 0; i < p.balancer.maxFails; i++ {
+		p.RecordError("model-a", account)
+	}
+
+	selected, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+	assert.NotEqual(t, account, selected)
+}
+
 func TestProxy_GenerateSessionID(t *testing.T) {
 	p := newTestProxy(t, []string{"acct1"})
 

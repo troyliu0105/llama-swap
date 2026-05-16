@@ -235,7 +235,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 					if acc, ok := resp.Request.Context().Value(codexAccountKey{}).(string); ok {
 						account = acc
 					}
-					pp.codexProxy.RecordStreamingResponse(account, resp.StatusCode)
+					pp.codexProxy.RecordStreamingResponse(model, account, resp.StatusCode)
 				}
 				peerLog("[PEER] ◀ %s | %s | %d SSE | %s\n", getPeerReqID(resp.Request), model, resp.StatusCode, pp.peerID)
 				return nil
@@ -289,7 +289,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 				if acc, ok := resp.Request.Context().Value(codexAccountKey{}).(string); ok {
 					account = acc
 				}
-				pp.codexProxy.RecordResponse(account, resp.StatusCode, body)
+				pp.codexProxy.RecordResponse(model, account, resp.StatusCode, body)
 			}
 
 			if proxyLogger.IsLevelEnabled(logmon.LevelTrace) && readErr == nil {
@@ -317,6 +317,13 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			}
 
 			pp.recordFailure()
+			if pp.codexProxy != nil {
+				account := ""
+				if acc, ok := r.Context().Value(codexAccountKey{}).(string); ok {
+					account = acc
+				}
+				pp.codexProxy.RecordError(model, account)
+			}
 
 			proxyLogger.Warnf("peer %s: proxy error: %v", pp.peerID, err)
 

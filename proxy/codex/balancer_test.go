@@ -2,25 +2,104 @@ package codex
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestBalancer_SingleAccount(t *testing.T) {
-	b := NewBalancer([]string{"only-one"}, "cache-hit")
+func TestBalancer_StickyRouting(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
 
-	selected, err := b.Select("any-model")
+	first, err := b.Select("model-x")
 	require.NoError(t, err)
-	assert.Equal(t, "only-one", selected)
+
+	for i := 0; i < 5; i++ {
+		selected, err := b.Select("model-x")
+		require.NoError(t, err)
+		assert.Equal(t, first, selected)
+	}
 }
 
-func TestBalancer_NoAccounts(t *testing.T) {
-	b := NewBalancer(nil, "cache-hit")
+func TestBalancer_Failover(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
 
-	_, err := b.Select("model")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no codex accounts available")
+	first, err := b.Select("model-x")
+	require.NoError(t, err)
+
+	b.RecordFailure("model-x", first)
+	b.RecordFailure("model-x", first)
+
+	selected, err := b.Select("model-x")
+	require.NoError(t, err)
+	assert.Equal(t, first, selected)
+
+	b.RecordFailure("model-x", first)
+
+	selected, err = b.Select("model-x")
+	require.NoError(t, err)
+	assert.NotEqual(t, first, selected)
+}
+
+func TestBalancer_PerModelIsolation(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
+	b.models["model-a"] = &modelState{account: "acct1", lastFailAt: make(map[string]time.Time)}
+	b.models["model-b"] = &modelState{account: "acct1", lastFailAt: make(map[string]time.Time)}
+
+	b.RecordFailure("model-a", "acct1")
+	b.RecordFailure("model-a", "acct1")
+	b.RecordFailure("model-a", "acct1")
+
+	selectedA, err := b.Select("model-a")
+	require.NoError(t, err)
+	selectedB, err := b.Select("model-b")
+	require.NoError(t, err)
+
+	assert.Equal(t, "acct2", selectedA)
+	assert.Equal(t, "acct1", selectedB)
+}
+
+func TestBalancer_TTLRecovery(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
+	b.cooldown = 10 * time.Millisecond
+
+	first, err := b.Select("model-x")
+	require.NoError(t, err)
+	for i := 0; i < b.maxFails; i++ {
+		b.RecordFailure("model-x", first)
+	}
+
+	second, err := b.Select("model-x")
+	require.NoError(t, err)
+	require.NotEqual(t, first, second)
+
+	time.Sleep(20 * time.Millisecond)
+	for i := 0; i < b.maxFails; i++ {
+		b.RecordFailure("model-x", second)
+	}
+
+	selected, err := b.Select("model-x")
+	require.NoError(t, err)
+	assert.Equal(t, first, selected)
+}
+
+func TestBalancer_AllAccountsFailedPicksEarliestExpiry(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2", "acct3"}, "sticky")
+	b.cooldown = time.Hour
+	now := time.Now()
+	b.models["model-x"] = &modelState{
+		account:   "acct3",
+		failCount: b.maxFails,
+		lastFailAt: map[string]time.Time{
+			"acct1": now.Add(-10 * time.Minute),
+			"acct2": now.Add(-30 * time.Minute),
+			"acct3": now.Add(-5 * time.Minute),
+		},
+	}
+
+	selected, err := b.Select("model-x")
+	require.NoError(t, err)
+	assert.Equal(t, "acct2", selected)
 }
 
 func TestBalancer_RoundRobin(t *testing.T) {
@@ -37,36 +116,68 @@ func TestBalancer_RoundRobin(t *testing.T) {
 	assert.Equal(t, 2, results["b"])
 }
 
-func TestBalancer_CacheHitAffinity(t *testing.T) {
+func TestBalancer_SingleAccount(t *testing.T) {
+	b := NewBalancer([]string{"only-one"}, "sticky")
+
+	selected, err := b.Select("any-model")
+	require.NoError(t, err)
+	assert.Equal(t, "only-one", selected)
+
+	for i := 0; i < b.maxFails; i++ {
+		b.RecordFailure("any-model", "only-one")
+	}
+
+	selected, err = b.Select("any-model")
+	require.NoError(t, err)
+	assert.Equal(t, "only-one", selected)
+}
+
+func TestBalancer_RemoveAccount(t *testing.T) {
+	b := NewBalancer([]string{"a", "b", "c"}, "sticky")
+
+	selected, err := b.Select("model-x")
+	require.NoError(t, err)
+	b.RemoveAccount(selected)
+
+	for i := 0; i < 10; i++ {
+		got, err := b.Select("model-x")
+		require.NoError(t, err)
+		assert.NotEqual(t, selected, got)
+	}
+}
+
+func TestBalancer_NoAccounts(t *testing.T) {
+	b := NewBalancer(nil, "sticky")
+
+	_, err := b.Select("model")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no codex accounts available")
+}
+
+func TestBalancer_CacheHitStrategyUsesStickyRouting(t *testing.T) {
 	b := NewBalancer([]string{"acct1", "acct2"}, "cache-hit")
 
 	first, err := b.Select("model-x")
 	require.NoError(t, err)
+	selected, err := b.Select("model-x")
+	require.NoError(t, err)
 
-	for i := 0; i < 5; i++ {
-		selected, err := b.Select("model-x")
-		require.NoError(t, err)
-		assert.Equal(t, first, selected, "affinity should keep model on same account")
-	}
+	assert.Equal(t, first, selected)
 }
 
-func TestBalancer_CacheHitSelection(t *testing.T) {
-	b := NewBalancer([]string{"low", "high"}, "cache-hit")
+func TestBalancer_DefaultStrategyUsesStickyRouting(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "")
 
-	b.RecordResult("high", true)
-	b.RecordResult("high", true)
-	b.RecordResult("high", true)
-	b.RecordResult("low", false)
-
-	b.ResetAffinity()
-
-	selected, err := b.Select("new-model")
+	first, err := b.Select("model-x")
 	require.NoError(t, err)
-	assert.Equal(t, "high", selected, "should prefer account with higher cache-hit rate")
+	selected, err := b.Select("model-x")
+	require.NoError(t, err)
+
+	assert.Equal(t, first, selected)
 }
 
 func TestBalancer_RecordResult(t *testing.T) {
-	b := NewBalancer([]string{"acct"}, "cache-hit")
+	b := NewBalancer([]string{"acct"}, "sticky")
 
 	b.RecordResult("acct", true)
 	b.RecordResult("acct", false)
@@ -79,7 +190,7 @@ func TestBalancer_RecordResult(t *testing.T) {
 }
 
 func TestBalancer_Stats(t *testing.T) {
-	b := NewBalancer([]string{"alpha", "beta"}, "cache-hit")
+	b := NewBalancer([]string{"alpha", "beta"}, "sticky")
 
 	b.RecordResult("alpha", true)
 	b.RecordResult("beta", false)
@@ -98,50 +209,15 @@ func TestBalancer_Stats(t *testing.T) {
 }
 
 func TestBalancer_ResetAffinity(t *testing.T) {
-	b := NewBalancer([]string{"a", "b"}, "cache-hit")
+	b := NewBalancer([]string{"a", "b"}, "sticky")
 
-	_, err := b.Select("model-x")
+	first, err := b.Select("model-x")
 	require.NoError(t, err)
-
-	b.RecordResult("b", true)
-	b.RecordResult("b", true)
-
 	b.ResetAffinity()
 
 	selected, err := b.Select("model-x")
 	require.NoError(t, err)
-	assert.Equal(t, "b", selected, "after reset, affinity should follow stats")
-}
-
-func TestBalancer_RemoveAccount(t *testing.T) {
-	b := NewBalancer([]string{"a", "b", "c"}, "round-robin")
-
-	b.RemoveAccount("b")
-
-	for i := 0; i < 10; i++ {
-		selected, err := b.Select("model")
-		require.NoError(t, err)
-		assert.NotEqual(t, "b", selected)
-	}
-}
-
-func TestBalancer_DefaultStrategy(t *testing.T) {
-	b := NewBalancer([]string{"a", "b"}, "")
-	_, err := b.Select("model")
-	require.NoError(t, err)
-}
-
-func TestBalancer_RemoveAccountClearsAffinity(t *testing.T) {
-	b := NewBalancer([]string{"a", "b"}, "cache-hit")
-
-	selected, err := b.Select("model-x")
-	require.NoError(t, err)
-
-	b.RemoveAccount(selected)
-
-	for i := 0; i < 10; i++ {
-		got, err := b.Select("model-x")
-		require.NoError(t, err)
-		assert.NotEqual(t, selected, got, "model should not route to removed account")
-	}
+	assert.NotEmpty(t, selected)
+	assert.NotContains(t, b.models, "missing-model")
+	assert.NotPanics(t, func() { b.RecordSuccess("model-x", first) })
 }
