@@ -201,9 +201,11 @@ func (mp *metricsMonitor) addCapture(capture ReqRespCapture) bool {
 		mp.logger.Warnf("capture %d too large (%d bytes), skipping: %v", capture.ID, len(compressed), err)
 		return false
 	}
+	mp.mu.Lock()
 	if mp.capturedIDs != nil {
 		mp.capturedIDs[capture.ID] = true
 	}
+	mp.mu.Unlock()
 	if mp.captureStore != nil {
 		go func(id int, data []byte) {
 			if err := mp.captureStore.Append(id, data); err != nil {

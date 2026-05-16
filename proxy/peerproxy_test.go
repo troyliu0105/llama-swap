@@ -397,7 +397,7 @@ func TestProxyRequest_ConcurrencyLimit(t *testing.T) {
 	var concurrentCount int32
 	var maxConcurrent int32
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cur := concurrentCount
+		cur := atomic.AddInt32(&concurrentCount, 1)
 		for {
 			old := atomic.LoadInt32(&maxConcurrent)
 			if cur <= old || atomic.CompareAndSwapInt32(&maxConcurrent, old, cur) {
