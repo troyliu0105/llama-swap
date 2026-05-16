@@ -6,3 +6,5 @@ dist/
 .DS_Store
 .dev/
 .worktrees/
+openspec/
+.sisyphus/
