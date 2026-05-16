@@ -38,6 +38,12 @@ func addApiHandlers(pm *ProxyManager) {
 		apiGroup.GET("/performance", pm.apiGetPerformance)
 		apiGroup.GET("/version", pm.apiGetVersion)
 		apiGroup.GET("/captures/:id", pm.apiGetCapture)
+		if pm.auditStore != nil {
+			apiGroup.GET("/audit/users", pm.apiAuditUsers)
+			apiGroup.GET("/audit/usage", pm.apiAuditUsage)
+			apiGroup.GET("/audit/usage/:user_id", pm.apiAuditUserUsage)
+			apiGroup.GET("/audit/captures", pm.apiAuditCaptures)
+		}
 	}
 }
 
@@ -357,6 +363,30 @@ func (pm *ProxyManager) apiGetCapture(c *gin.Context) {
 		return
 	}
 
+	if pm.auditStore != nil {
+		data, err := pm.auditStore.GetCaptureByMetricID(int64(id))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get capture"})
+			return
+		}
+		if data == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "capture not found"})
+			return
+		}
+		capture, err := decompressCapture(data)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decompress capture"})
+			return
+		}
+		jsonBytes, err := json.Marshal(capture)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal capture"})
+			return
+		}
+		c.Data(http.StatusOK, "application/json", jsonBytes)
+		return
+	}
+
 	capture := pm.metricsMonitor.getCaptureByID(id)
 	if capture == nil || (capture.ReqPath == "" && capture.ReqHeaders == nil && capture.ReqBody == nil && capture.RespHeaders == nil && capture.RespBody == nil) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "capture not found"})
@@ -369,4 +399,74 @@ func (pm *ProxyManager) apiGetCapture(c *gin.Context) {
 		return
 	}
 	c.Data(http.StatusOK, "application/json", jsonBytes)
+}
+
+func (pm *ProxyManager) apiAuditUsers(c *gin.Context) {
+	users, err := pm.auditStore.ListUsers()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list audit users"})
+		return
+	}
+	c.JSON(http.StatusOK, users)
+}
+
+func (pm *ProxyManager) apiAuditUsage(c *gin.Context) {
+	period := c.DefaultQuery("period", "24h")
+	if period != "24h" && period != "7d" && period != "30d" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "period must be one of: 24h, 7d, 30d"})
+		return
+	}
+	entries, err := pm.auditStore.GetUsageOverview(period)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get usage overview"})
+		return
+	}
+	c.JSON(http.StatusOK, entries)
+}
+
+func (pm *ProxyManager) apiAuditUserUsage(c *gin.Context) {
+	userIDStr := c.Param("user_id")
+	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+	period := c.DefaultQuery("period", "24h")
+	if period != "24h" && period != "7d" && period != "30d" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "period must be one of: 24h, 7d, 30d"})
+		return
+	}
+	entries, err := pm.auditStore.GetUserUsage(userID, period)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get user usage"})
+		return
+	}
+	c.JSON(http.StatusOK, entries)
+}
+
+func (pm *ProxyManager) apiAuditCaptures(c *gin.Context) {
+	userIDStr := c.Query("user_id")
+	if userIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id query parameter required"})
+		return
+	}
+	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+	limit := 50
+	if l, err := strconv.Atoi(c.DefaultQuery("limit", "50")); err == nil && l > 0 {
+		limit = l
+	}
+	offset := 0
+	if o, err := strconv.Atoi(c.DefaultQuery("offset", "0")); err == nil && o >= 0 {
+		offset = o
+	}
+	captures, err := pm.auditStore.ListCaptures(userID, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list captures"})
+		return
+	}
+	c.JSON(http.StatusOK, captures)
 }

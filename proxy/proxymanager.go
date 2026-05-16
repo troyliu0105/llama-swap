@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/mostlygeek/llama-swap/event"
+	"github.com/mostlygeek/llama-swap/internal/audit"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/internal/perf"
 	"github.com/mostlygeek/llama-swap/proxy/config"
@@ -77,6 +78,7 @@ type ProxyManager struct {
 
 	metricsMonitor *metricsMonitor
 	perfMonitor    *perf.Monitor
+	auditStore     *audit.AuditStore
 
 	processGroups map[string]*ProcessGroup
 
@@ -178,15 +180,6 @@ func New(proxyConfig config.Config) *ProxyManager {
 	} else {
 		maxMetrics = proxyConfig.MetricsMaxInMemory
 	}
-	var cs *captureStore
-	if proxyConfig.CapturePersistPath != "" {
-		maxPersist := proxyConfig.CapturePersistMax
-		if maxPersist <= 0 {
-			maxPersist = 5120
-		}
-		cs = newCaptureStore(proxyConfig.CapturePersistPath, maxPersist, proxyLogger)
-	}
-
 	peerProxy, err := NewEnhancedPeerProxy(proxyConfig.Peers, proxyConfig.PrefixPeerModels, proxyLogger)
 	if err != nil {
 		proxyLogger.Errorf("Disabling Peering. Failed to create proxy peers: %v", err)
@@ -201,7 +194,7 @@ func New(proxyConfig config.Config) *ProxyManager {
 		muxLogger:      muxLogger,
 		upstreamLogger: upstreamLogger,
 
-		metricsMonitor: newMetricsMonitor(proxyLogger, maxMetrics, proxyConfig.CaptureBuffer, cs),
+		metricsMonitor: newMetricsMonitor(proxyLogger, maxMetrics, 0, nil),
 
 		processGroups: make(map[string]*ProcessGroup),
 
@@ -215,6 +208,23 @@ func New(proxyConfig config.Config) *ProxyManager {
 		version:   "0",
 
 		peerProxy: peerProxy,
+	}
+
+	if proxyConfig.Audit.Enabled {
+		auditStore, err := audit.NewAuditStore(
+			proxyConfig.Audit.Database,
+			proxyConfig.Audit.RetentionDays,
+			proxyConfig.Audit.CaptureFlushSize,
+			proxyConfig.Audit.CaptureFlushInterval,
+			proxyLogger,
+		)
+		if err != nil {
+			proxyLogger.Errorf("Failed to initialize audit store: %v", err)
+		} else {
+			pm.auditStore = auditStore
+			pm.metricsMonitor.SetAuditStore(auditStore)
+			pm.metricsMonitor.SetAPIKeys(proxyConfig.APIKeys)
+		}
 	}
 
 	// create either matrix or process groups (mutually exclusive)
@@ -572,6 +582,12 @@ func (pm *ProxyManager) Shutdown() {
 
 	if pm.matrix != nil {
 		pm.matrix.Shutdown()
+		if pm.auditStore != nil {
+			if err := pm.auditStore.Close(); err != nil {
+				pm.proxyLogger.Warnf("failed to close audit store: %v", err)
+			}
+			pm.auditStore = nil
+		}
 		pm.shutdownCancel()
 		return
 	}
@@ -586,6 +602,12 @@ func (pm *ProxyManager) Shutdown() {
 		}(processGroup)
 	}
 	wg.Wait()
+	if pm.auditStore != nil {
+		if err := pm.auditStore.Close(); err != nil {
+			pm.proxyLogger.Warnf("failed to close audit store: %v", err)
+		}
+		pm.auditStore = nil
+	}
 	pm.shutdownCancel()
 }
 
@@ -778,7 +800,7 @@ func (pm *ProxyManager) proxyToUpstream(c *gin.Context) {
 
 	// attempt to record metrics if it is a POST request
 	if pm.metricsMonitor != nil && c.Request.Method == "POST" {
-		if err := pm.metricsMonitor.wrapHandler(modelID, c.Writer, c.Request, captureNone, handler); err != nil {
+		if err := pm.metricsMonitor.wrapHandler(modelID, c.Writer, c.Request, captureNone, pm.getAPIKey(c), handler); err != nil {
 			pm.sendErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("error proxying metrics wrapped request: %s", err.Error()))
 			pm.proxyLogger.Errorf("Error proxying wrapped upstream request for model %s, path=%s", modelID, originalPath)
 			return
@@ -933,7 +955,7 @@ func (pm *ProxyManager) mkProxyJSONHandler(cf captureFields) func(*gin.Context) 
 		c.Request = c.Request.WithContext(ctx)
 
 		if pm.metricsMonitor != nil && c.Request.Method == "POST" {
-			if err := pm.metricsMonitor.wrapHandler(modelID, c.Writer, c.Request, cf, nextHandler); err != nil {
+			if err := pm.metricsMonitor.wrapHandler(modelID, c.Writer, c.Request, cf, pm.getAPIKey(c), nextHandler); err != nil {
 				pm.sendErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("error proxying metrics wrapped request: %s", err.Error()))
 				pm.proxyLogger.Errorf("Error Proxying Metrics Wrapped Request model %s", modelID)
 				return
@@ -1082,7 +1104,7 @@ func (pm *ProxyManager) mkPostFormHandler(cf captureFields) func(*gin.Context) {
 
 		// Use the modified request for proxying
 		if pm.metricsMonitor != nil {
-			if err := pm.metricsMonitor.wrapHandler(modelID, c.Writer, modifiedReq, cf, nextHandler); err != nil {
+			if err := pm.metricsMonitor.wrapHandler(modelID, c.Writer, modifiedReq, cf, pm.getAPIKey(c), nextHandler); err != nil {
 				pm.sendErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("error proxying request: %s", err.Error()))
 				pm.proxyLogger.Errorf("Error Proxying Request for model %s", modelID)
 				return

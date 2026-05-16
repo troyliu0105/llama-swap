@@ -16,9 +16,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	"github.com/mostlygeek/llama-swap/event"
+	"github.com/mostlygeek/llama-swap/internal/audit"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/internal/ring"
 	"github.com/mostlygeek/llama-swap/proxy/cache"
+	"github.com/mostlygeek/llama-swap/proxy/config"
 	"github.com/tidwall/gjson"
 )
 
@@ -123,48 +125,32 @@ type metricsMonitor struct {
 	// capture fields
 	enableCaptures bool
 	captureCache   *cache.Cache // zstd-compressed CBOR of ReqRespCapture
-	captureStore   *captureStore
 	capturedIDs    map[int]bool // all IDs that have persisted captures
+	auditStore     *audit.AuditStore
+	apiKeys        config.APIKeyMap
 }
 
 // newMetricsMonitor creates a new metricsMonitor. captureBufferMB is the
 // capture buffer size in megabytes; 0 disables captures.
-func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB int, captureStore *captureStore) *metricsMonitor {
+func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB int, _ any) *metricsMonitor {
 	mm := &metricsMonitor{
 		logger:         logger,
 		metrics:        ring.NewBuffer[ActivityLogEntry](maxMetrics),
 		enableCaptures: captureBufferMB > 0,
-		captureStore:   captureStore,
 	}
 	if captureBufferMB > 0 {
 		mm.captureCache = cache.New(captureBufferMB * 1024 * 1024)
 		mm.capturedIDs = make(map[int]bool)
 	}
-	if mm.captureCache != nil && captureStore != nil {
-		entries, err := captureStore.Load()
-		if err != nil {
-			logger.Warnf("failed to load capture persistence: %v", err)
-		} else {
-			maxID := mm.nextID - 1
-			for _, entry := range entries {
-				if err := mm.captureCache.Add(entry.ID, entry.Data); err != nil {
-					logger.Warnf("failed to restore capture %d: %v", entry.ID, err)
-					continue
-				}
-				mm.capturedIDs[entry.ID] = true
-				if entry.ID > maxID {
-					maxID = entry.ID
-				}
-			}
-			if maxID >= mm.nextID {
-				mm.nextID = maxID + 1
-			}
-		}
-		if err := captureStore.Compact(); err != nil {
-			logger.Warnf("failed to compact capture persistence: %v", err)
-		}
-	}
 	return mm
+}
+
+func (mp *metricsMonitor) SetAuditStore(store *audit.AuditStore) {
+	mp.auditStore = store
+}
+
+func (mp *metricsMonitor) SetAPIKeys(keys config.APIKeyMap) {
+	mp.apiKeys = keys
 }
 
 // queueMetrics adds a new metric to the collection without emitting an event.
@@ -206,14 +192,6 @@ func (mp *metricsMonitor) addCapture(capture ReqRespCapture) bool {
 		mp.capturedIDs[capture.ID] = true
 	}
 	mp.mu.Unlock()
-	if mp.captureStore != nil {
-		go func(id int, data []byte) {
-			if err := mp.captureStore.Append(id, data); err != nil {
-				mp.logger.Warnf("failed to persist capture %d: %v", id, err)
-			}
-		}(capture.ID, compressed)
-	}
-
 	compressionRatio := (1 - float64(len(compressed))/float64(uncompressedBytes)) * 100
 	mp.logger.Debugf("Capture %d compressed and saved: %d bytes -> %d bytes (%.1f%% compression)", capture.ID, uncompressedBytes, len(compressed), compressionRatio)
 	return true
@@ -236,27 +214,7 @@ func (mp *metricsMonitor) getCompressedBytes(id int) ([]byte, bool) {
 func (mp *metricsMonitor) getCaptureByID(id int) *ReqRespCapture {
 	data, exists := mp.getCompressedBytes(id)
 	if !exists {
-		if mp.captureStore == nil {
-			return nil
-		}
-		entries, err := mp.captureStore.Load()
-		if err != nil {
-			mp.logger.Warnf("failed to load capture store for fallback: %v", err)
-			return nil
-		}
-		for _, entry := range entries {
-			if entry.ID == id {
-				data = entry.Data
-				exists = true
-				if mp.captureCache != nil {
-					mp.captureCache.Add(id, data)
-				}
-				break
-			}
-		}
-		if !exists {
-			return nil
-		}
+		return nil
 	}
 
 	capture, err := decompressCapture(data)
@@ -328,13 +286,15 @@ func (mp *metricsMonitor) wrapHandler(
 	writer gin.ResponseWriter,
 	request *http.Request,
 	captureFields captureFields,
+	apiKey string,
 	next func(modelID string, w http.ResponseWriter, r *http.Request) error,
 ) error {
 	requestStart := time.Now()
+	captureEnabled := mp.enableCaptures || mp.auditStore != nil
 	// Capture request body and headers if captures enabled
 	var reqBody []byte
 	var reqHeaders map[string]string
-	if mp.enableCaptures && (captureFields&captureReqBody) != 0 {
+	if captureEnabled && (captureFields&captureReqBody) != 0 {
 		if request.Body != nil {
 			var err error
 			reqBody, err = io.ReadAll(request.Body)
@@ -345,7 +305,7 @@ func (mp *metricsMonitor) wrapHandler(
 			request.Body = io.NopCloser(bytes.NewBuffer(reqBody))
 		}
 	}
-	if mp.enableCaptures && (captureFields&captureReqHeaders) != 0 {
+	if captureEnabled && (captureFields&captureReqHeaders) != 0 {
 		reqHeaders = make(map[string]string)
 		for key, values := range request.Header {
 			if len(values) > 0 {
@@ -383,6 +343,7 @@ func (mp *metricsMonitor) wrapHandler(
 		mp.logger.Warnf("non-200 response, recording partial metrics: status=%d, path=%s", recorder.Status(), request.URL.Path)
 		tm.ID = mp.queueMetrics(tm)
 		mp.emitMetric(tm)
+		mp.recordAudit(apiKey, request.URL.Path, reqBody, tm, nil)
 		return nil
 	}
 
@@ -391,6 +352,7 @@ func (mp *metricsMonitor) wrapHandler(
 		mp.logger.Warn("metrics: empty body, recording minimal metrics")
 		tm.ID = mp.queueMetrics(tm)
 		mp.emitMetric(tm)
+		mp.recordAudit(apiKey, request.URL.Path, reqBody, tm, nil)
 		return nil
 	}
 
@@ -402,6 +364,7 @@ func (mp *metricsMonitor) wrapHandler(
 			mp.logger.Warnf("metrics: decompression failed: %v, path=%s, recording minimal metrics", err, request.URL.Path)
 			tm.ID = mp.queueMetrics(tm)
 			mp.emitMetric(tm)
+			mp.recordAudit(apiKey, request.URL.Path, reqBody, tm, nil)
 			return nil
 		}
 	}
@@ -445,7 +408,7 @@ func (mp *metricsMonitor) wrapHandler(
 
 	// Build capture if enabled and determine if it will be stored
 	var capture *ReqRespCapture
-	if mp.enableCaptures {
+	if captureEnabled {
 		var respHeaders map[string]string
 		var respBody []byte
 		if (captureFields & captureRespHeaders) != 0 {
@@ -476,14 +439,59 @@ func (mp *metricsMonitor) wrapHandler(
 	// Store capture if enabled
 	if capture != nil {
 		capture.ID = metricID
-		if mp.addCapture(*capture) {
+		if mp.enableCaptures && mp.addCapture(*capture) {
 			tm.HasCapture = true
+		}
+		if mp.auditStore != nil {
+			tm.HasCapture = true
+			if mp.capturedIDs == nil {
+				mp.capturedIDs = make(map[int]bool)
+			}
+			mp.capturedIDs[metricID] = true
 		}
 	}
 
 	mp.emitMetric(tm)
+	mp.recordAudit(apiKey, request.URL.Path, reqBody, tm, capture)
 
 	return nil
+}
+
+func (mp *metricsMonitor) recordAudit(apiKey, reqPath string, reqBody []byte, tm ActivityLogEntry, capture *ReqRespCapture) {
+	if mp.auditStore == nil {
+		return
+	}
+	validMetrics := tm.Tokens.InputTokens > 0 || tm.Tokens.OutputTokens > 0
+	if !validMetrics && tm.RespStatusCode == http.StatusOK {
+		return
+	}
+
+	var captureData []byte
+	if capture != nil {
+		compressed, _, err := compressCapture(capture)
+		if err == nil {
+			captureData = compressed
+		} else {
+			mp.logger.Warnf("failed to compress audit capture: %v, skipping capture", err)
+		}
+	}
+
+	var fingerprint string
+	if len(reqBody) > 0 && audit.IsChatEndpoint(reqPath) {
+		fingerprint = audit.ComputeFingerprint(reqPath, reqBody)
+	}
+
+	var userName string
+	if cfg, ok := mp.apiKeys[apiKey]; ok {
+		userName = cfg.Name
+	}
+
+	mp.auditStore.RecordRequest(
+		tm.ID, apiKey, userName, tm.Model, tm.ReqPath, tm.RespStatusCode,
+		tm.Tokens.InputTokens, tm.Tokens.OutputTokens, tm.Tokens.CachedTokens,
+		tm.DurationMs, tm.Tokens.TokensPerSecond, tm.Tokens.PromptPerSecond,
+		captureData, fingerprint,
+	)
 }
 
 // usagePaths lists the JSON paths where a per-event usage object can live.
@@ -627,7 +635,6 @@ func buildMetrics(modelID string, start time.Time, inputTokens, outputTokens, ca
 	durationMs := wallDurationMs
 	tokensPerSecond := -1.0
 	promptPerSecond := -1.0
-
 
 	if timings.Exists() {
 		inputTokens = timings.Get("prompt_n").Int()
