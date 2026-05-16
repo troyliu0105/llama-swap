@@ -40,6 +40,14 @@ func (pm *ProxyManager) streamLogsHandler(c *gin.Context) {
 		logMonitorId = logMonitorId[:idx]
 	}
 
+	// Check model access for model-specific log streams
+	if logMonitorId != "" && logMonitorId != "proxy" && logMonitorId != "upstream" {
+		if !pm.isModelAllowedForContext(c, logMonitorId) {
+			pm.sendErrorResponse(c, http.StatusForbidden, fmt.Sprintf("API key not authorized for model: %s", logMonitorId))
+			return
+		}
+	}
+
 	logger, err := pm.getLogger(logMonitorId)
 	if err != nil {
 		c.String(http.StatusBadRequest, err.Error())

@@ -129,7 +129,10 @@ macros:
 # apiKeys: require an API key when making requests to inference endpoints
 # - optional, default: []
 # - when empty (the default) authorization will not be checked as llama-swap is default-allow
-# - each key is a non-empty string
+# - each key is a non-empty string without spaces
+# - supports list format (backward compatible) and dict format (with optional model restrictions)
+#
+# List format - all keys have unrestricted access:
 apiKeys:
   - "sk-hunter2"
   # tip, one liner: printf "sk-%s\n" "$(head -c 48 /dev/urandom | base64 )"
@@ -138,6 +141,14 @@ apiKeys:
   # use environment variable macros to keep secrets out of the config
   - "${env.API_KEY_1}"
   - "${env.API_KEY_2}"
+
+# Dict format with model restrictions - restrict which models each key can access:
+# apiKeys:
+#   "sk-restricted":
+#     models: ["gpt-5.2", "claude-sonnet-4"]  # only these models
+#   "sk-full-access":                          # no models list = unrestricted
+#   "sk-no-models":
+#     models: []                               # empty list = no model access
 
 # models: a dictionary of model configurations
 # - required

@@ -78,6 +78,116 @@ func (ml MacroList) ToMap() map[string]any {
 	return result
 }
 
+// APIKeyConfig holds optional restrictions for an API key.
+// An empty Models list means the key has access to all models.
+type APIKeyConfig struct {
+	Models []string `yaml:"models"`
+}
+
+// APIKeyMap maps API key strings to their configuration.
+// It supports both YAML list format (backward compatible) and dict format:
+//
+//	# List format (no restrictions):
+//	apiKeys: ["key1", "key2"]
+//
+//	# Dict format (with optional model restrictions):
+//	apiKeys:
+//	  key1:
+//	    models: ["model-a", "model-b"]
+//	  key2:  # no restrictions
+type APIKeyMap map[string]APIKeyConfig
+
+func (am *APIKeyMap) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.MappingNode {
+		result := make(map[string]APIKeyConfig, len(value.Content)/2)
+		for i := 0; i < len(value.Content); i += 2 {
+			keyNode := value.Content[i]
+			valNode := value.Content[i+1]
+
+			var key string
+			if err := keyNode.Decode(&key); err != nil {
+				return fmt.Errorf("apiKeys: invalid key: %w", err)
+			}
+
+			var cfg APIKeyConfig
+			if valNode.Kind != 0 {
+				if err := valNode.Decode(&cfg); err != nil {
+					return fmt.Errorf("apiKeys.%s: %w", key, err)
+				}
+			}
+			result[key] = cfg
+		}
+		*am = result
+		return nil
+	}
+
+	if value.Kind == yaml.SequenceNode {
+		var keys []string
+		if err := value.Decode(&keys); err != nil {
+			return fmt.Errorf("apiKeys must be a list of strings or a mapping")
+		}
+		result := make(map[string]APIKeyConfig, len(keys))
+		for _, key := range keys {
+			result[key] = APIKeyConfig{}
+		}
+		*am = result
+		return nil
+	}
+
+	return fmt.Errorf("apiKeys must be a list of strings or a mapping")
+}
+
+func (am APIKeyMap) HasKey(key string) bool {
+	_, exists := am[key]
+	return exists
+}
+
+func (am APIKeyMap) IsModelAllowed(apiKey, requestedModel string, realModelName func(string) (string, bool)) bool {
+	keyConfig, exists := am[apiKey]
+	if !exists {
+		return false
+	}
+	if len(keyConfig.Models) == 0 {
+		return true
+	}
+
+	allowed := make(map[string]bool, len(keyConfig.Models)*2)
+	for _, m := range keyConfig.Models {
+		allowed[m] = true
+		if real, found := realModelName(m); found {
+			allowed[real] = true
+		}
+	}
+
+	if allowed[requestedModel] {
+		return true
+	}
+	if real, found := realModelName(requestedModel); found && allowed[real] {
+		return true
+	}
+
+	return false
+}
+
+func (am APIKeyMap) AllowedModelIDs(apiKey string, realModelName func(string) (string, bool)) map[string]bool {
+	keyConfig, exists := am[apiKey]
+	if !exists {
+		return map[string]bool{}
+	}
+	if len(keyConfig.Models) == 0 {
+		return nil
+	}
+
+	allowed := make(map[string]bool, len(keyConfig.Models)*2)
+	for _, m := range keyConfig.Models {
+		allowed[m] = true
+		if real, found := realModelName(m); found {
+			allowed[real] = true
+		}
+	}
+	return allowed
+}
+
 type GroupConfig struct {
 	Swap       bool     `yaml:"swap"`
 	Exclusive  bool     `yaml:"exclusive"`
@@ -161,7 +271,8 @@ type Config struct {
 	IncludeAliasesInList bool `yaml:"includeAliasesInList"`
 
 	// support API keys, see issue #433, #50, #251
-	RequiredAPIKeys []string `yaml:"apiKeys"`
+	// supports both list format ["key1","key2"] and dict format with model restrictions
+	APIKeys APIKeyMap `yaml:"apiKeys"`
 
 	// support remote peers, see issue #433, #296
 	Peers PeerDictionaryExtConfig `yaml:"peers"`
@@ -516,14 +627,13 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 	}
 
 	// Validate API keys (env macros already substituted at string level)
-	for i, apikey := range config.RequiredAPIKeys {
+	for apikey := range config.APIKeys {
 		if apikey == "" {
 			return Config{}, fmt.Errorf("empty api key found in apiKeys")
 		}
 		if strings.Contains(apikey, " ") {
 			return Config{}, fmt.Errorf("api key cannot contain spaces: `%s`", apikey)
 		}
-		config.RequiredAPIKeys[i] = apikey
 	}
 
 	// Process peers with global macro substitution

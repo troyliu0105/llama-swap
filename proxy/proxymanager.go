@@ -439,9 +439,9 @@ func (pm *ProxyManager) setupGinEngine() {
 	pm.ginEngine.GET("/v1/models", pm.apiKeyAuth(), pm.listModelsHandler)
 
 	// in proxymanager_loghandlers.go
-	pm.ginEngine.GET("/logs", pm.apiKeyAuth(), pm.sendLogsHandlers)
-	pm.ginEngine.GET("/logs/stream", pm.apiKeyAuth(), pm.streamLogsHandler)
-	pm.ginEngine.GET("/logs/stream/*logMonitorID", pm.apiKeyAuth(), pm.streamLogsHandler)
+	pm.ginEngine.GET("/logs", pm.apiKeyAuth(), pm.blockRestrictedKeys(), pm.sendLogsHandlers)
+	pm.ginEngine.GET("/logs/stream", pm.apiKeyAuth(), pm.blockRestrictedKeys(), pm.streamLogsHandler)
+	pm.ginEngine.GET("/logs/stream/*logMonitorID", pm.apiKeyAuth(), pm.blockRestrictedKeys(), pm.streamLogsHandler)
 
 	/**
 	 * User Interface Endpoints
@@ -454,7 +454,7 @@ func (pm *ProxyManager) setupGinEngine() {
 		c.Redirect(http.StatusFound, "/ui/models")
 	})
 	pm.ginEngine.Any("/upstream/*upstreamPath", pm.apiKeyAuth(), pm.trackInflight(), pm.proxyToUpstream)
-	pm.ginEngine.GET("/unload", pm.apiKeyAuth(), pm.unloadAllModelsHandler)
+	pm.ginEngine.GET("/unload", pm.apiKeyAuth(), pm.blockRestrictedKeys(), pm.unloadAllModelsHandler)
 	pm.ginEngine.GET("/running", pm.apiKeyAuth(), pm.listRunningProcessesHandler)
 	pm.ginEngine.GET("/health", func(c *gin.Context) {
 		c.String(http.StatusOK, "OK")
@@ -610,6 +610,7 @@ func (pm *ProxyManager) swapProcessGroup(realModelName string) (*ProcessGroup, e
 func (pm *ProxyManager) listModelsHandler(c *gin.Context) {
 	data := make([]gin.H, 0, len(pm.config.Models))
 	createdTime := time.Now().Unix()
+	allowed := pm.allowedModelIDsForContext(c)
 
 	newRecord := func(modelId string, modelConfig config.ModelConfig) gin.H {
 		record := gin.H{
@@ -639,6 +640,9 @@ func (pm *ProxyManager) listModelsHandler(c *gin.Context) {
 		if modelConfig.Unlisted {
 			continue
 		}
+		if allowed != nil && !allowed[id] {
+			continue
+		}
 
 		data = append(data, newRecord(id, modelConfig))
 
@@ -662,6 +666,9 @@ func (pm *ProxyManager) listModelsHandler(c *gin.Context) {
 				displayID := modelID
 				if peerPrefix {
 					displayID = peerID + "/" + modelID
+				}
+				if allowed != nil && !allowed[displayID] && !allowed[modelID] {
+					continue
 				}
 				record := newRecord(displayID, config.ModelConfig{
 					Name: fmt.Sprintf("%s: %s", peerID, modelID),
@@ -731,6 +738,11 @@ func (pm *ProxyManager) proxyToUpstream(c *gin.Context) {
 		return
 	}
 
+	if !pm.isModelAllowedForContext(c, searchModelName) {
+		pm.sendErrorResponse(c, http.StatusForbidden, fmt.Sprintf("API key not authorized for model: %s", searchModelName))
+		return
+	}
+
 	// Redirect /upstream/modelname to /upstream/modelname/ for URL consistency.
 	// This ensures relative URLs in upstream responses resolve correctly and
 	// provides canonical URL form. Uses 308 for POST/PUT/etc to preserve the
@@ -791,6 +803,11 @@ func (pm *ProxyManager) mkProxyJSONHandler(cf captureFields) func(*gin.Context) 
 		requestedModel := gjson.GetBytes(bodyBytes, "model").String()
 		if requestedModel == "" {
 			pm.sendErrorResponse(c, http.StatusBadRequest, "missing or invalid 'model' key")
+			return
+		}
+
+		if !pm.isModelAllowedForContext(c, requestedModel) {
+			pm.sendErrorResponse(c, http.StatusForbidden, fmt.Sprintf("API key not authorized for model: %s", requestedModel))
 			return
 		}
 
@@ -948,6 +965,11 @@ func (pm *ProxyManager) mkPostFormHandler(cf captureFields) func(*gin.Context) {
 			return
 		}
 
+		if !pm.isModelAllowedForContext(c, requestedModel) {
+			pm.sendErrorResponse(c, http.StatusForbidden, fmt.Sprintf("API key not authorized for model: %s", requestedModel))
+			return
+		}
+
 		// Look for a matching local model first, then check peers
 		var nextHandler func(modelID string, w http.ResponseWriter, r *http.Request) error
 		var useModelName string
@@ -1082,6 +1104,11 @@ func (pm *ProxyManager) proxyGETModelHandler(c *gin.Context) {
 		return
 	}
 
+	if !pm.isModelAllowedForContext(c, requestedModel) {
+		pm.sendErrorResponse(c, http.StatusForbidden, fmt.Sprintf("API key not authorized for model: %s", requestedModel))
+		return
+	}
+
 	var nextHandler func(modelID string, w http.ResponseWriter, r *http.Request) error
 	var modelID string
 
@@ -1129,7 +1156,7 @@ func (pm *ProxyManager) sendErrorResponse(c *gin.Context, statusCode int, messag
 // apiKeyAuth returns a middleware that validates API keys if configured.
 // Returns a pass-through handler if no API keys are configured.
 func (pm *ProxyManager) apiKeyAuth() gin.HandlerFunc {
-	if len(pm.config.RequiredAPIKeys) == 0 {
+	if len(pm.config.APIKeys) == 0 {
 		return func(c *gin.Context) { c.Next() }
 	}
 
@@ -1163,14 +1190,7 @@ func (pm *ProxyManager) apiKeyAuth() gin.HandlerFunc {
 			providedKey = xApiKey
 		}
 
-		// Validate key
-		valid := false
-		for _, key := range pm.config.RequiredAPIKeys {
-			if providedKey == key {
-				valid = true
-				break
-			}
-		}
+		valid := pm.config.APIKeys.HasKey(providedKey)
 
 		if !valid {
 			c.Header("WWW-Authenticate", `Basic realm="llama-swap"`)
@@ -1179,10 +1199,52 @@ func (pm *ProxyManager) apiKeyAuth() gin.HandlerFunc {
 			return
 		}
 
+		c.Set("apiKey", providedKey)
+
 		// Strip auth headers to prevent leakage to upstream
 		c.Request.Header.Del("Authorization")
 		c.Request.Header.Del("x-api-key")
 
+		c.Next()
+	}
+}
+
+func (pm *ProxyManager) getAPIKey(c *gin.Context) string {
+	key, _ := c.Get("apiKey")
+	if k, ok := key.(string); ok {
+		return k
+	}
+	return ""
+}
+
+func (pm *ProxyManager) isModelAllowedForContext(c *gin.Context, requestedModel string) bool {
+	apiKey := pm.getAPIKey(c)
+	if apiKey == "" {
+		return true
+	}
+	return pm.config.APIKeys.IsModelAllowed(apiKey, requestedModel, pm.config.RealModelName)
+}
+
+func (pm *ProxyManager) allowedModelIDsForContext(c *gin.Context) map[string]bool {
+	apiKey := pm.getAPIKey(c)
+	if apiKey == "" {
+		return nil
+	}
+	return pm.config.APIKeys.AllowedModelIDs(apiKey, pm.config.RealModelName)
+}
+
+func (pm *ProxyManager) blockRestrictedKeys() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKey := pm.getAPIKey(c)
+		if apiKey == "" {
+			c.Next()
+			return
+		}
+		if keyConfig, exists := pm.config.APIKeys[apiKey]; exists && len(keyConfig.Models) > 0 {
+			pm.sendErrorResponse(c, http.StatusForbidden, "API key with model restrictions cannot access management endpoints")
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
@@ -1195,9 +1257,13 @@ func (pm *ProxyManager) unloadAllModelsHandler(c *gin.Context) {
 func (pm *ProxyManager) listRunningProcessesHandler(context *gin.Context) {
 	context.Header("Content-Type", "application/json")
 	runningProcesses := make([]gin.H, 0) // Default to an empty response.
+	allowed := pm.allowedModelIDsForContext(context)
 
 	if pm.matrix != nil {
 		for _, modelID := range pm.matrix.RunningModels() {
+			if allowed != nil && !allowed[modelID] {
+				continue
+			}
 			if process, ok := pm.matrix.GetProcess(modelID); ok {
 				runningProcesses = append(runningProcesses, gin.H{
 					"model":       process.ID,
@@ -1214,6 +1280,9 @@ func (pm *ProxyManager) listRunningProcessesHandler(context *gin.Context) {
 		for _, processGroup := range pm.processGroups {
 			for _, process := range processGroup.processes {
 				if process.CurrentState() == StateReady {
+					if allowed != nil && !allowed[process.ID] {
+						continue
+					}
 					runningProcesses = append(runningProcesses, gin.H{
 						"model":       process.ID,
 						"state":       process.CurrentState(),

@@ -28,7 +28,8 @@ type Model struct {
 func addApiHandlers(pm *ProxyManager) {
 	// Add API endpoints for React to consume
 	// Protected with API key authentication
-	apiGroup := pm.ginEngine.Group("/api", pm.apiKeyAuth())
+	// Keys with model restrictions are blocked from UI management endpoints
+	apiGroup := pm.ginEngine.Group("/api", pm.apiKeyAuth(), pm.blockRestrictedKeys())
 	{
 		apiGroup.POST("/models/unload", pm.apiUnloadAllModels)
 		apiGroup.POST("/models/unload/*model", pm.apiUnloadSingleModelHandler)
@@ -313,6 +314,11 @@ func (pm *ProxyManager) apiUnloadSingleModelHandler(c *gin.Context) {
 	realModelName, found := pm.config.RealModelName(requestedModel)
 	if !found {
 		pm.sendErrorResponse(c, http.StatusNotFound, "Model not found")
+		return
+	}
+
+	if !pm.isModelAllowedForContext(c, requestedModel) {
+		pm.sendErrorResponse(c, http.StatusForbidden, fmt.Sprintf("API key not authorized for model: %s", requestedModel))
 		return
 	}
 

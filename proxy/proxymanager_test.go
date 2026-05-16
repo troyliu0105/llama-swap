@@ -1417,7 +1417,7 @@ models:
 }
 
 func TestProxyManager_APIKeyAuth_Disabled(t *testing.T) {
-	// Config without RequiredAPIKeys - auth should be disabled
+	// Config without APIKeys - auth should be disabled
 	testConfig := testConfigFromYAML(t, `
 healthCheckTimeout: 15
 logLevel: error
@@ -1437,6 +1437,127 @@ models:
 
 		proxy.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
+	})
+}
+
+func TestProxyManager_APIKeyModelRestrictions(t *testing.T) {
+	t.Run("restricted key blocks unauthorized model", func(t *testing.T) {
+		testConfig := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+apiKeys:
+  key1:
+    models: ["model1"]
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+`)
+
+		proxy := New(testConfig)
+		defer proxy.StopProcesses(StopImmediately)
+		injectTestHandlers(proxy, nil)
+
+		reqBody := `{"model":"model2"}`
+		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+		req.Header.Set("x-api-key", "key1")
+		w := CreateTestResponseRecorder()
+
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusForbidden, w.Code)
+
+		reqBody = `{"model":"model1"}`
+		req = httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+		req.Header.Set("x-api-key", "key1")
+		w = CreateTestResponseRecorder()
+
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), "model1")
+	})
+
+	t.Run("unrestricted key allows any model", func(t *testing.T) {
+		testConfig := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+apiKeys:
+  key1:
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+`)
+
+		proxy := New(testConfig)
+		defer proxy.StopProcesses(StopImmediately)
+		injectTestHandlers(proxy, nil)
+
+		reqBody := `{"model":"model2"}`
+		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+		req.Header.Set("x-api-key", "key1")
+		w := CreateTestResponseRecorder()
+
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), "model2")
+	})
+
+	t.Run("models list is filtered by api key restrictions", func(t *testing.T) {
+		testConfig := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+apiKeys:
+  key1:
+    models: ["model1"]
+  key2:
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+`)
+
+		proxy := New(testConfig)
+		defer proxy.StopProcesses(StopImmediately)
+
+		req := httptest.NewRequest("GET", "/v1/models", nil)
+		req.Header.Set("x-api-key", "key1")
+		w := CreateTestResponseRecorder()
+		proxy.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		var restrictedResponse struct {
+			Data []map[string]interface{} `json:"data"`
+		}
+		if assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &restrictedResponse)) {
+			assert.Len(t, restrictedResponse.Data, 1)
+			if assert.Len(t, restrictedResponse.Data, 1) {
+				assert.Equal(t, "model1", restrictedResponse.Data[0]["id"])
+			}
+		}
+
+		req = httptest.NewRequest("GET", "/v1/models", nil)
+		req.Header.Set("x-api-key", "key2")
+		w = CreateTestResponseRecorder()
+		proxy.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		var unrestrictedResponse struct {
+			Data []map[string]interface{} `json:"data"`
+		}
+		if assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &unrestrictedResponse)) {
+			assert.Len(t, unrestrictedResponse.Data, 2)
+
+			modelIDs := map[string]bool{}
+			for _, model := range unrestrictedResponse.Data {
+				modelID, ok := model["id"].(string)
+				assert.True(t, ok)
+				modelIDs[modelID] = true
+			}
+			assert.Equal(t, map[string]bool{"model1": true, "model2": true}, modelIDs)
+		}
 	})
 }
 

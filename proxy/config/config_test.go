@@ -811,6 +811,127 @@ func TestConfig_APIKeys_Invalid(t *testing.T) {
 	}
 }
 
+func TestConfig_APIKeyModels(t *testing.T) {
+	t.Run("dict format parsing", func(t *testing.T) {
+		content := `
+apiKeys:
+  key1:
+    models: ["model-a", "model-b"]
+  key2:
+  key3:
+    models: []
+`
+		config, err := LoadConfigFromReader(strings.NewReader(content))
+		assert.NoError(t, err)
+
+		assert.Len(t, config.APIKeys, 3)
+		assert.Equal(t, []string{"model-a", "model-b"}, config.APIKeys["key1"].Models)
+		assert.Empty(t, config.APIKeys["key2"].Models)
+		assert.Equal(t, []string{}, config.APIKeys["key3"].Models)
+	})
+
+	t.Run("backward compatible list format", func(t *testing.T) {
+		content := `apiKeys: ["key1", "key2"]`
+		config, err := LoadConfigFromReader(strings.NewReader(content))
+		assert.NoError(t, err)
+
+		assert.Len(t, config.APIKeys, 2)
+		assert.Empty(t, config.APIKeys["key1"].Models)
+		assert.Empty(t, config.APIKeys["key2"].Models)
+	})
+
+	t.Run("dict format validation errors", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			content     string
+			expectedErr string
+		}{
+			{
+				name: "empty key",
+				content: `
+apiKeys:
+  "":
+    models: ["model-a"]
+`,
+				expectedErr: "empty api key found in apiKeys",
+			},
+			{
+				name: "key with spaces",
+				content: `
+apiKeys:
+  "key 1":
+    models: ["model-a"]
+`,
+				expectedErr: "api key cannot contain spaces: `key 1`",
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				_, err := LoadConfigFromReader(strings.NewReader(tt.content))
+				if assert.Error(t, err) {
+					assert.Equal(t, tt.expectedErr, err.Error())
+				}
+			})
+		}
+	})
+}
+
+func TestAPIKeyMap_IsModelAllowed(t *testing.T) {
+	config := Config{
+		Models: map[string]ModelConfig{
+			"model-a":    {},
+			"real-model": {Aliases: []string{"alias-x"}},
+		},
+		aliases: map[string]string{
+			"alias-x": "real-model",
+		},
+	}
+
+	apiKeys := APIKeyMap{
+		"unrestricted-key": {},
+		"restricted-key":   {Models: []string{"model-a"}},
+		"alias-key":        {Models: []string{"alias-x"}},
+		"real-key":         {Models: []string{"real-model"}},
+		"peer-key":         {Models: []string{"peer/model"}},
+	}
+
+	assert.True(t, apiKeys.IsModelAllowed("unrestricted-key", "model-a", config.RealModelName))
+	assert.True(t, apiKeys.IsModelAllowed("unrestricted-key", "unknown-model", config.RealModelName))
+	assert.True(t, apiKeys.IsModelAllowed("restricted-key", "model-a", config.RealModelName))
+	assert.False(t, apiKeys.IsModelAllowed("restricted-key", "real-model", config.RealModelName))
+	assert.True(t, apiKeys.IsModelAllowed("alias-key", "real-model", config.RealModelName))
+	assert.True(t, apiKeys.IsModelAllowed("real-key", "alias-x", config.RealModelName))
+	assert.False(t, apiKeys.IsModelAllowed("unknown-key", "model-a", config.RealModelName))
+	assert.True(t, apiKeys.IsModelAllowed("peer-key", "peer/model", config.RealModelName))
+}
+
+func TestAPIKeyMap_AllowedModelIDs(t *testing.T) {
+	config := Config{
+		Models: map[string]ModelConfig{
+			"model-a":    {},
+			"real-model": {Aliases: []string{"alias-x"}},
+		},
+		aliases: map[string]string{
+			"alias-x": "real-model",
+		},
+	}
+
+	apiKeys := APIKeyMap{
+		"unrestricted-key": {},
+		"restricted-key":   {Models: []string{"model-a", "real-model"}},
+		"alias-key":        {Models: []string{"alias-x"}},
+	}
+
+	assert.Nil(t, apiKeys.AllowedModelIDs("unrestricted-key", config.RealModelName))
+	assert.Equal(t, map[string]bool{"model-a": true, "real-model": true}, apiKeys.AllowedModelIDs("restricted-key", config.RealModelName))
+
+	aliasAllowed := apiKeys.AllowedModelIDs("alias-key", config.RealModelName)
+	assert.True(t, aliasAllowed["real-model"])
+	assert.True(t, aliasAllowed["alias-x"])
+	assert.Equal(t, map[string]bool{}, apiKeys.AllowedModelIDs("missing-key", config.RealModelName))
+}
+
 func TestConfig_APIKeys_EnvMacros(t *testing.T) {
 	t.Run("env substitution in apiKeys", func(t *testing.T) {
 		t.Setenv("TEST_API_KEY", "secret-key-123")
@@ -818,7 +939,7 @@ func TestConfig_APIKeys_EnvMacros(t *testing.T) {
 		content := `apiKeys: ["${env.TEST_API_KEY}"]`
 		config, err := LoadConfigFromReader(strings.NewReader(content))
 		assert.NoError(t, err)
-		assert.Equal(t, []string{"secret-key-123"}, config.RequiredAPIKeys)
+		assert.Equal(t, APIKeyMap{"secret-key-123": {}}, config.APIKeys)
 	})
 
 	t.Run("multiple env substitutions in apiKeys", func(t *testing.T) {
@@ -828,7 +949,7 @@ func TestConfig_APIKeys_EnvMacros(t *testing.T) {
 		content := `apiKeys: ["${env.TEST_API_KEY_1}", "${env.TEST_API_KEY_2}", "static-key"]`
 		config, err := LoadConfigFromReader(strings.NewReader(content))
 		assert.NoError(t, err)
-		assert.Equal(t, []string{"key-one", "key-two", "static-key"}, config.RequiredAPIKeys)
+		assert.Equal(t, APIKeyMap{"key-one": {}, "key-two": {}, "static-key": {}}, config.APIKeys)
 	})
 
 	t.Run("missing env var in apiKeys", func(t *testing.T) {
@@ -1389,7 +1510,7 @@ models:
 		// because they only appear in comment lines
 		config, err := LoadConfigFromReader(strings.NewReader(content))
 		assert.NoError(t, err)
-		assert.Empty(t, config.RequiredAPIKeys)
+		assert.Empty(t, config.APIKeys)
 	})
 
 	t.Run("env macros in comments ignored while active ones resolve", func(t *testing.T) {
@@ -1405,7 +1526,7 @@ models:
 `
 		config, err := LoadConfigFromReader(strings.NewReader(content))
 		assert.NoError(t, err)
-		assert.Equal(t, []string{"active-key-value"}, config.RequiredAPIKeys)
+		assert.Equal(t, APIKeyMap{"active-key-value": {}}, config.APIKeys)
 	})
 
 	t.Run("env macros in indented comments are ignored", func(t *testing.T) {
@@ -1435,7 +1556,7 @@ models:
 `
 		config, err := LoadConfigFromReader(strings.NewReader(content))
 		assert.NoError(t, err)
-		assert.Equal(t, []string{"real-value"}, config.RequiredAPIKeys)
+		assert.Equal(t, APIKeyMap{"real-value": {}}, config.APIKeys)
 	})
 
 }
