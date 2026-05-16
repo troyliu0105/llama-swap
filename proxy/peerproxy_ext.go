@@ -221,6 +221,14 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 		reverseProxy.ModifyResponse = func(resp *http.Response) error {
 			contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 			isSSE := strings.Contains(contentType, "text/event-stream")
+
+			// Codex API returns SSE-formatted responses with text/plain content-type.
+			// Normalize to text/event-stream so downstream handlers (metrics, UI) work correctly.
+			if !isSSE && pp.codexProxy != nil && strings.Contains(contentType, "text/plain") {
+				isSSE = true
+				resp.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
+			}
+
 			model := getPeerModel(resp.Request)
 
 			if isSSE {
