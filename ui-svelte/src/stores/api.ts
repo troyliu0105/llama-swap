@@ -206,6 +206,84 @@ export async function getCapture(id: number): Promise<ReqRespCapture | null> {
   }
 }
 
+export interface AuditUser {
+  id: number;
+  api_key: string;
+  name: string;
+  created_at: string;
+  total_requests: number;
+  last_request_at: string;
+}
+
+export interface AuditUsageEntry {
+  user_id: number;
+  name: string;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+}
+
+export interface AuditModelUsage {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  request_count: number;
+}
+
+export interface AuditCaptureInfo {
+  id: number;
+  session_id: number;
+  model: string;
+  req_path: string;
+  seq_num: number;
+  created_at: string;
+}
+
+export async function fetchAuditUsers(): Promise<AuditUser[]> {
+  try {
+    const response = await fetch("/api/audit/users");
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Failed to fetch audit users:", error);
+    return [];
+  }
+}
+
+export async function fetchAuditUsage(period: string = "24h"): Promise<AuditUsageEntry[]> {
+  try {
+    const response = await fetch(`/api/audit/usage?period=${period}`);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Failed to fetch audit usage:", error);
+    return [];
+  }
+}
+
+export async function fetchAuditUserUsage(userId: number, period: string = "7d"): Promise<AuditModelUsage[]> {
+  try {
+    const response = await fetch(`/api/audit/usage/${userId}?period=${period}`);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Failed to fetch user usage:", error);
+    return [];
+  }
+}
+
+export async function fetchAuditCaptures(userId: number, limit: number = 50, offset: number = 0): Promise<AuditCaptureInfo[]> {
+  try {
+    const response = await fetch(`/api/audit/captures?user_id=${userId}&limit=${limit}&offset=${offset}`);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Failed to fetch audit captures:", error);
+    return [];
+  }
+}
+
 export async function fetchPerformance(after?: string): Promise<PerformanceResponse | null> {
   try {
     const url = after ? `/api/performance?after=${encodeURIComponent(after)}` : "/api/performance";

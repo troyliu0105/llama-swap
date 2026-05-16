@@ -5,6 +5,7 @@
   import LogViewer from "./routes/LogViewer.svelte";
   import Models from "./routes/Models.svelte";
   import Activity from "./routes/Activity.svelte";
+  import Audit from "./routes/Audit.svelte";
   import Performance from "./routes/Performance.svelte";
   import Playground from "./routes/Playground.svelte";
   import PlaygroundStub from "./routes/PlaygroundStub.svelte";
@@ -17,6 +18,7 @@
     "/models": Models,
     "/logs": LogViewer,
     "/activity": Activity,
+    "/audit": Audit,
     "/performance": Performance,
     "*": PlaygroundStub,
   };
