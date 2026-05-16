@@ -137,11 +137,41 @@
             "default": 1000,
             "description": "Maximum number of metrics to keep in memory. Controls how many metrics are stored before older ones are discarded."
         },
-        "captureBuffer": {
-            "type": "integer",
-            "minimum": 0,
-            "default": 5,
-            "description": "Size in megabytes of the buffer for storing request/response captures. Set to 0 to disable captures."
+        "audit": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable audit logging for request metrics and captures."
+                },
+                "database": {
+                    "type": "string",
+                    "default": "",
+                    "description": "SQLite database path for audit logging."
+                },
+                "retentionDays": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Number of days to retain audit records."
+                },
+                "captureFlushInterval": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Interval in seconds between capture flushes."
+                },
+                "captureFlushSize": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Number of captures to buffer before flushing."
+                }
+            },
+            "additionalProperties": false,
+            "default": {},
+            "description": "Audit logging configuration for request metrics and captures stored in SQLite."
         },
         "performance": {
             "type": "object",
@@ -453,6 +483,11 @@
                                             "minLength": 1
                                         },
                                         "description": "List of model IDs (or aliases) this key can access. Empty array means no model access. Omit for unrestricted access."
+                                    },
+                                    "name": {
+                                        "type": "string",
+                                        "default": "",
+                                        "description": "Optional display name for this API key."
                                     }
                                 },
                                 "additionalProperties": false

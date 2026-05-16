@@ -50,11 +50,6 @@ logToStdout: "proxy"
 # - useful for limiting memory usage when processing large volumes of metrics
 metricsMaxInMemory: 1000
 
-# captureBuffer: how many MBs to allocate for storing request/response captures
-# - optional, default: 10
-# - set to 0 to disable
-captureBuffer: 15
-
 # performance: configuration for system monitoring statistics
 # - timing values are duration strings like 1s, 1h30m, 90m, 2h10s, etc.
 performance:
@@ -91,6 +86,14 @@ rerankSigmoidScores: false
 # - when true, model aliases will be output to the API model listing duplicating
 #   all fields except for Id so chat UIs can use the alias equivalent to the original.
 includeAliasesInList: false
+
+# Audit logging stores request metrics and captures in SQLite.
+# audit:
+#   enabled: true
+#   database: ./data/audit.db
+#   retentionDays: 60
+#   captureFlushInterval: 30
+#   captureFlushSize: 50
 
 # globalTTL: the default TTL in seconds before unloading a model
 # - optional, default: 0 (never automatically unload)
@@ -144,6 +147,9 @@ apiKeys:
 
 # Dict format with model restrictions - restrict which models each key can access:
 # apiKeys:
+#   key-alice:
+#     name: "Alice"
+#     models: ["model-a"]
 #   "sk-restricted":
 #     models: ["gpt-5.2", "claude-sonnet-4"]  # only these models
 #   "sk-full-access":                          # no models list = unrestricted

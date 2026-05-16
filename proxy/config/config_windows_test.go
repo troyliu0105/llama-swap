@@ -223,9 +223,7 @@ groups:
 		},
 		HealthCheckTimeout: 15,
 		MetricsMaxInMemory: 1000,
-		CaptureBuffer:      5,
-		CapturePersistPath: "",
-		CapturePersistMax:  5120,
+
 		Performance: PerformanceConfig{
 			Every: 5 * time.Second,
 		},

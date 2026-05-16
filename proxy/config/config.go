@@ -82,6 +82,7 @@ func (ml MacroList) ToMap() map[string]any {
 // An empty Models list means the key has access to all models.
 type APIKeyConfig struct {
 	Models []string `yaml:"models"`
+	Name   string   `yaml:"name"`
 }
 
 // APIKeyMap maps API key strings to their configuration.
@@ -227,6 +228,14 @@ type HookOnStartup struct {
 	Preload []string `yaml:"preload"`
 }
 
+type AuditConfig struct {
+	Enabled              bool   `yaml:"enabled"`
+	Database             string `yaml:"database"`
+	RetentionDays        int    `yaml:"retentionDays"`
+	CaptureFlushInterval int    `yaml:"captureFlushInterval"` // seconds
+	CaptureFlushSize     int    `yaml:"captureFlushSize"`
+}
+
 type Config struct {
 	HealthCheckTimeout int                    `yaml:"healthCheckTimeout"`
 	LogRequests        bool                   `yaml:"logRequests"`
@@ -234,9 +243,6 @@ type Config struct {
 	LogTimeFormat      string                 `yaml:"logTimeFormat"`
 	LogToStdout        string                 `yaml:"logToStdout"`
 	MetricsMaxInMemory int                    `yaml:"metricsMaxInMemory"`
-	CaptureBuffer      int                    `yaml:"captureBuffer"`
-	CapturePersistPath string                 `yaml:"capturePersistPath"`
-	CapturePersistMax  int                    `yaml:"capturePersistMax"`
 	Performance        PerformanceConfig      `yaml:"performance"`
 	GlobalTTL          int                    `yaml:"globalTTL"`
 	Models             map[string]ModelConfig `yaml:"models"` /* key is model ID */
@@ -272,7 +278,8 @@ type Config struct {
 
 	// support API keys, see issue #433, #50, #251
 	// supports both list format ["key1","key2"] and dict format with model restrictions
-	APIKeys APIKeyMap `yaml:"apiKeys"`
+	APIKeys APIKeyMap   `yaml:"apiKeys"`
+	Audit   AuditConfig `yaml:"audit"`
 
 	// support remote peers, see issue #433, #296
 	Peers PeerDictionaryExtConfig `yaml:"peers"`
@@ -330,9 +337,6 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		LogTimeFormat:      "",
 		LogToStdout:        LogToStdoutProxy,
 		MetricsMaxInMemory: 1000,
-		CaptureBuffer:      5,
-		CapturePersistPath: "",
-		CapturePersistMax:  5120,
 		GlobalTTL:          0,
 	}
 	if err = yaml.Unmarshal([]byte(yamlStr), &config); err != nil {
