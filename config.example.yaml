@@ -460,6 +460,7 @@ hooks:
 # - optional, default empty dictionary
 # - peers can be another llama-swap
 # - peers can be any server that provides the /v1/ generative api endpoints supported by llama-swap
+# - codex peers use OAuth tokens instead of API keys and forward to the Codex backend
 peers:
   # keys is the peer'd ID
   llama-swap-peer:
@@ -569,3 +570,41 @@ peers:
     # - per-peer setting overrides the global prefixPeerModels config
     # - useful to disambiguate models with the same name across different peers
     prefixPeerModels: false
+
+  # Example: OpenAI Codex peer with multi-account load balancing
+  # - type: codex activates Codex-specific URL rewriting and header injection
+  # - Requests to /v1/chat/completions and /v1/responses are forwarded to
+  #   the Codex backend at chatgpt.com/backend-api/codex/responses
+  # - Headers are set to impersonate OpenCode (User-Agent, originator, session_id)
+  # - Authentication uses OAuth tokens obtained via device auth flow
+  # - Multiple accounts are load balanced for cache-hit optimization
+  codex:
+    # type: set to "codex" for OpenAI Codex backend
+    # - required for codex peers
+    type: codex
+    # proxy: not needed for codex peers, defaults to https://chatgpt.com
+    # models: list of OpenAI models available via Codex
+    # - these are the model names used in API calls
+    models:
+      - gpt-4o
+      - o3
+      - o4-mini
+    # codex: Codex-specific configuration
+    codex:
+      # accounts: list of named accounts for load balancing
+      # - each account must be authenticated via `llama-swap codex-login --account <name>`
+      # - tokens are stored in ~/.llama-swap/codex-auth.json
+      accounts:
+        - name: primary
+        - name: secondary
+      # loadBalance: controls how accounts are selected for requests
+      loadBalance:
+        # strategy: account selection strategy
+        # - "cache-hit" (default): routes to accounts with highest cache-hit rates
+        #   maintains model→account affinity for prompt cache reuse
+        # - "round-robin": simple round-robin distribution
+        strategy: cache-hit
+    # maxConcurrent, queueSize, queueTimeout, requestInterval, timeout
+    # all work the same as regular peers
+    maxConcurrent: 5
+    timeout: 120s
