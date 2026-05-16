@@ -565,6 +565,11 @@ func (pm *ProxyManager) Shutdown() {
 
 	pm.proxyLogger.Debug("Shutdown() called in proxy manager")
 
+	// Shut down peer proxies (stop queue goroutines, close transports)
+	if pm.peerProxy != nil {
+		pm.peerProxy.Shutdown()
+	}
+
 	if pm.matrix != nil {
 		pm.matrix.Shutdown()
 		pm.shutdownCancel()

@@ -17,10 +17,13 @@ import (
 	"time"
 
 	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/mostlygeek/llama-swap/proxy/codex"
 	"github.com/mostlygeek/llama-swap/proxy/config"
 )
 
 type peerCtxKey struct{}
+
+type codexAccountKey struct{}
 
 func peerLog(format string, args ...any) {
 	ts := time.Now().Format("15:04:05.000")
@@ -103,6 +106,7 @@ type enhancedPeerMember struct {
 	waitingCount  int32
 	logger        *logmon.Monitor
 	stopCh        chan struct{}
+	codexProxy    *codex.Proxy
 
 	backoffMu       sync.Mutex
 	lastRequestMu   sync.Mutex
@@ -169,10 +173,49 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			logger:          proxyLogger,
 		}
 
+		if peer.Type == "codex" && peer.Codex != nil {
+			accountNames := make([]string, len(peer.Codex.Accounts))
+			for i, acct := range peer.Codex.Accounts {
+				accountNames[i] = acct.Name
+			}
+			strategy := peer.Codex.LoadBalance.Strategy
+
+			codexProxy, err := codex.NewProxy(
+				peerID,
+				codex.DefaultAuthPath(),
+				accountNames,
+				strategy,
+				peerTimeout,
+				func(format string, args ...any) {
+					proxyLogger.Infof(format, args...)
+				},
+			)
+			if err != nil {
+				return nil, fmt.Errorf("peer %s: failed to create codex proxy: %w", peerID, err)
+			}
+			pp.codexProxy = codexProxy
+		}
+
 		originalDirector := reverseProxy.Director
 		reverseProxy.Director = func(req *http.Request) {
 			originalDirector(req)
 			req.Host = req.URL.Host
+		}
+
+		if pp.codexProxy != nil {
+			reverseProxy.Director = func(req *http.Request) {
+				req.Host = req.URL.Host
+				// Strip forwarding headers that ReverseProxy would otherwise add.
+				// httputil.ReverseProxy automatically injects X-Forwarded-For,
+				// which would leak the client IP to chatgpt.com.
+				req.Header["X-Forwarded-For"] = nil
+				req.Header["X-Forwarded-Host"] = nil
+				req.Header.Del("X-Forwarded-Proto")
+				req.Header.Del("X-Forwarded-Server")
+				req.Header.Del("X-Real-IP")
+				req.Header.Del("Forwarded")
+				req.Header.Del("Via")
+			}
 		}
 
 		reverseProxy.ModifyResponse = func(resp *http.Response) error {
@@ -186,6 +229,13 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 					pp.recordFailure()
 				} else {
 					pp.recordSuccess()
+				}
+				if pp.codexProxy != nil {
+					account := ""
+					if acc, ok := resp.Request.Context().Value(codexAccountKey{}).(string); ok {
+						account = acc
+					}
+					pp.codexProxy.RecordStreamingResponse(account, resp.StatusCode)
 				}
 				peerLog("[PEER] ◀ %s | %s | %d SSE | %s\n", getPeerReqID(resp.Request), model, resp.StatusCode, pp.peerID)
 				return nil
@@ -232,6 +282,14 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 						}
 					}
 				}
+			}
+
+			if pp.codexProxy != nil && readErr == nil {
+				account := ""
+				if acc, ok := resp.Request.Context().Value(codexAccountKey{}).(string); ok {
+					account = acc
+				}
+				pp.codexProxy.RecordResponse(account, resp.StatusCode, body)
 			}
 
 			if proxyLogger.IsLevelEnabled(logmon.LevelTrace) && readErr == nil {
@@ -353,6 +411,17 @@ func (p *EnhancedPeerProxy) GetOriginalModelName(modelID string) string {
 	return modelID
 }
 
+func (p *EnhancedPeerProxy) Shutdown() {
+	for _, pp := range p.proxyMap {
+		if pp.stopCh != nil {
+			close(pp.stopCh)
+		}
+		if pp.codexProxy != nil {
+			pp.codexProxy.Close()
+		}
+	}
+}
+
 func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWriter, request *http.Request) error {
 	pp, found := p.proxyMap[modelID]
 	if !found {
@@ -368,23 +437,34 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 
 	peerLog("[PEER] ▶ %s | %s | %s %s | %s\n", modelID, getPeerReqID(request), request.Method, request.URL.Path, pp.peerID)
 
-	if pp.apiKey != "" {
-		request.Header.Set("Authorization", "Bearer "+pp.apiKey)
-		request.Header.Set("x-api-key", pp.apiKey)
-	}
-
-	for key, value := range pp.headers {
-		if value == "" {
-			request.Header.Del(key)
-		} else {
-			request.Header.Set(key, value)
+	if pp.codexProxy != nil {
+		account, err := pp.codexProxy.PrepareRequest(modelID, request)
+		if err != nil {
+			peerLog("[CODEX ERROR] %s | %s | auth_error | %s | %s\n", getPeerReqID(request), modelID, pp.peerID, err)
+			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+			return nil
 		}
-	}
+		ctx := context.WithValue(request.Context(), codexAccountKey{}, account)
+		request = request.WithContext(ctx)
+	} else {
+		if pp.apiKey != "" {
+			request.Header.Set("Authorization", "Bearer "+pp.apiKey)
+			request.Header.Set("x-api-key", pp.apiKey)
+		}
 
-	if pp.stripV1Prefix {
-		request.URL.Path = strings.TrimPrefix(request.URL.Path, "/v1")
-		if request.URL.Path == "" {
-			request.URL.Path = "/"
+		for key, value := range pp.headers {
+			if value == "" {
+				request.Header.Del(key)
+			} else {
+				request.Header.Set(key, value)
+			}
+		}
+
+		if pp.stripV1Prefix {
+			request.URL.Path = strings.TrimPrefix(request.URL.Path, "/v1")
+			if request.URL.Path == "" {
+				request.URL.Path = "/"
+			}
 		}
 	}
 
