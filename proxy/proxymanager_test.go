@@ -1847,7 +1847,9 @@ func TestProxyManager_AudioTranscriptionCapture(t *testing.T) {
 	cfg := testConfigFromYAML(t, `
 healthCheckTimeout: 15
 logLevel: error
-captureBuffer: 5
+audit:
+  enabled: true
+  database: `+t.TempDir()+`/audit.db
 models:
   TheExpectedModel:
     cmd: {{RESPONDER}} --port ${PORT} --silent --respond TheExpectedModel
@@ -1880,25 +1882,9 @@ models:
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
-	// Verify capture exists
+	// Verify metrics recorded
 	metrics := proxy.metricsMonitor.getMetrics()
 	assert.Equal(t, 1, len(metrics))
-	assert.True(t, metrics[0].HasCapture)
-
-	capture := proxy.metricsMonitor.getCaptureByID(metrics[0].ID)
-	assert.NotNil(t, capture)
-
-	// Should capture request headers (sensitive ones redacted)
-	assert.NotEmpty(t, capture.ReqHeaders)
-	assert.Equal(t, "[REDACTED]", capture.ReqHeaders["Authorization"])
-	assert.Equal(t, "req-value", capture.ReqHeaders["X-Custom-Req"])
-
-	// Should capture response headers
-	assert.NotNil(t, capture.RespHeaders)
-
-	// Should NOT capture request bodies but get response bodies (text
-	assert.Nil(t, capture.ReqBody)
-	assert.NotNil(t, capture.RespBody)
 }
 
 func TestProxyManager_VersionlessEndpoints_LocalModel(t *testing.T) {

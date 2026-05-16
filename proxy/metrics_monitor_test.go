@@ -203,7 +203,7 @@ func TestMetricsMonitor_WrapHandler(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -239,7 +239,7 @@ func TestMetricsMonitor_WrapHandler(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -278,7 +278,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -302,7 +302,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -326,7 +326,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -350,7 +350,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err) // Errors after response is sent are logged, not returned
 
 		metrics := mm.getMetrics()
@@ -372,7 +372,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.Equal(t, expectedErr, err)
 
 		metrics := mm.getMetrics()
@@ -395,7 +395,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -434,7 +434,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -464,7 +464,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -639,7 +639,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -674,7 +674,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -706,7 +706,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -741,7 +741,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -778,7 +778,7 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -817,7 +817,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -846,7 +846,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -875,7 +875,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -921,7 +921,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -965,7 +965,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -993,7 +993,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -1019,7 +1019,7 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -1101,7 +1101,7 @@ func TestMetricsMonitor_WrapHandler_Compression(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -1135,7 +1135,7 @@ func TestMetricsMonitor_WrapHandler_Compression(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -1163,7 +1163,7 @@ func TestMetricsMonitor_WrapHandler_Compression(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err) // Should not return error, just log warning
 
 		metrics := mm.getMetrics()
@@ -1190,7 +1190,7 @@ func TestMetricsMonitor_WrapHandler_Compression(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
@@ -1402,7 +1402,7 @@ func TestMetricsMonitor_WrapHandler_Capture(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		// Check metric was recorded
@@ -1440,7 +1440,7 @@ func TestMetricsMonitor_WrapHandler_Capture(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		// Metrics should still be recorded
@@ -1472,7 +1472,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureReqHeaders, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureReqHeaders, "", nextHandler)
 		assert.NoError(t, err)
 
 		capture := mm.getCaptureByID(mm.getMetrics()[0].ID)
@@ -1491,7 +1491,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureReqBody, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureReqBody, "", nextHandler)
 		assert.NoError(t, err)
 
 		capture := mm.getCaptureByID(mm.getMetrics()[0].ID)
@@ -1508,7 +1508,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureRespHeaders, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureRespHeaders, "", nextHandler)
 		assert.NoError(t, err)
 
 		capture := mm.getCaptureByID(mm.getMetrics()[0].ID)
@@ -1526,7 +1526,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureRespBody, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureRespBody, "", nextHandler)
 		assert.NoError(t, err)
 
 		capture := mm.getCaptureByID(mm.getMetrics()[0].ID)
@@ -1545,7 +1545,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureReqAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureReqAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		capture := mm.getCaptureByID(mm.getMetrics()[0].ID)
@@ -1563,7 +1563,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureRespAll, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureRespAll, "", nextHandler)
 		assert.NoError(t, err)
 
 		capture := mm.getCaptureByID(mm.getMetrics()[0].ID)
@@ -1582,7 +1582,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureFields(0), nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureFields(0), "", nextHandler)
 		assert.NoError(t, err)
 
 		capture := mm.getCaptureByID(mm.getMetrics()[0].ID)
@@ -1601,7 +1601,7 @@ func TestMetricsMonitor_WrapHandler_PartialCaptures(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureReqHeaders|captureRespBody, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureReqHeaders|captureRespBody, "", nextHandler)
 		assert.NoError(t, err)
 
 		capture := mm.getCaptureByID(mm.getMetrics()[0].ID)
