@@ -18,6 +18,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/internal/perf"
 	"github.com/mostlygeek/llama-swap/proxy"
+	"github.com/mostlygeek/llama-swap/proxy/codex"
 	"github.com/mostlygeek/llama-swap/proxy/config"
 	"github.com/mostlygeek/llama-swap/proxy/configwatcher"
 )
@@ -29,6 +30,21 @@ var (
 )
 
 func main() {
+	// Check for subcommands before flag parsing
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "codex-login":
+			codexLoginCmd(os.Args[2:])
+			return
+		case "codex-logout":
+			codexLogoutCmd(os.Args[2:])
+			return
+		case "codex-accounts":
+			codexAccountsCmd(os.Args[2:])
+			return
+		}
+	}
+
 	// Define a command-line flag for the port
 	configPath := flag.String("config", "config.yaml", "config file name")
 	listenStr := flag.String("listen", "", "listen ip/port")
@@ -235,6 +251,43 @@ func main() {
 		}
 	}()
 
-	// Wait for exit signal
 	<-exitChan
+}
+
+func codexLoginCmd(args []string) {
+	fs := flag.NewFlagSet("codex-login", flag.ExitOnError)
+	account := fs.String("account", "default", "account name")
+	authPath := fs.String("auth-path", codex.DefaultAuthPath(), "path to auth store")
+	fs.Parse(args)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	if err := codex.RunLogin(ctx, *account, *authPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func codexLogoutCmd(args []string) {
+	fs := flag.NewFlagSet("codex-logout", flag.ExitOnError)
+	account := fs.String("account", "default", "account name")
+	authPath := fs.String("auth-path", codex.DefaultAuthPath(), "path to auth store")
+	fs.Parse(args)
+
+	if err := codex.RunLogout(*account, *authPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func codexAccountsCmd(args []string) {
+	fs := flag.NewFlagSet("codex-accounts", flag.ExitOnError)
+	authPath := fs.String("auth-path", codex.DefaultAuthPath(), "path to auth store")
+	fs.Parse(args)
+
+	if err := codex.RunListAccounts(*authPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 }
