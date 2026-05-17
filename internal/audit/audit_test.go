@@ -60,7 +60,11 @@ func queryInt(t *testing.T, db *sql.DB, query string, args ...any) int {
 }
 
 func recordRequest(store *AuditStore, apiKey, model, reqPath string, inputTokens, outputTokens, cachedTokens int, captureData []byte, fingerprint string) {
-	store.RecordRequest(0, apiKey, "TestUser", model, reqPath, 200, inputTokens, outputTokens, cachedTokens, 123, 45.6, 7.8, captureData, fingerprint)
+	store.RecordRequest(0, apiKey, "TestUser", model, reqPath, 200, inputTokens, outputTokens, cachedTokens, 123, 45.6, 7.8, captureData, fingerprint, "")
+}
+
+func recordCodexRequest(store *AuditStore, apiKey, userName, model, codexAccount string, inputTokens, outputTokens, cachedTokens int) {
+	store.RecordRequest(0, apiKey, userName, model, "/v1/chat/completions", 200, inputTokens, outputTokens, cachedTokens, 123, 45.6, 7.8, nil, "", codexAccount)
 }
 
 func closeStore(t *testing.T, store *AuditStore) {
@@ -152,7 +156,7 @@ func TestAuditStore_RecordRequest_DropsOnFullChannel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		store.RecordRequest(0, "dropped", "", "model", "/v1/chat/completions", 200, 0, 0, 0, 0, 0, 0, nil, "")
+		store.RecordRequest(0, "dropped", "", "model", "/v1/chat/completions", 200, 0, 0, 0, 0, 0, 0, nil, "", "")
 		close(done)
 	}()
 
@@ -496,6 +500,90 @@ func TestAuditStore_GetUserUsage(t *testing.T) {
 	assert.Equal(t, int64(1), entries[1].RequestCount)
 }
 
+func TestAuditStore_GetCodexUsage_NoData(t *testing.T) {
+	store, _ := newTestAuditStore(t, 0, 1)
+	defer closeStore(t, store)
+
+	entries, err := store.GetCodexUsage("24h")
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestAuditStore_GetCodexUsage(t *testing.T) {
+	store, _ := newTestAuditStore(t, 0, 1)
+	defer closeStore(t, store)
+	recordRequest(store, "standard-key", "model-a", "/v1/chat/completions", 100, 200, 50, nil, "")
+	recordCodexRequest(store, "codex-one", "Codex One", "gpt-5", "account-a", 10, 20, 5)
+	recordCodexRequest(store, "codex-one", "Codex One", "gpt-5", "account-a", 1, 2, -1)
+	recordCodexRequest(store, "codex-one", "Codex One", "gpt-5", "account-b", 3, 4, 7)
+	recordCodexRequest(store, "codex-two", "Codex Two", "gpt-5", "account-a", 6, 8, 0)
+	eventuallyCount(t, store.db, `SELECT COUNT(*) FROM request_log`, 5)
+
+	entries, err := store.GetCodexUsage("24h")
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	byUserAndAccount := map[string]CodexUsageEntry{}
+	for _, entry := range entries {
+		byUserAndAccount[entry.Name+":"+entry.CodexAccount] = entry
+	}
+
+	accountA := byUserAndAccount["Codex One:account-a"]
+	assert.NotZero(t, accountA.UserID)
+	assert.Equal(t, int64(11), accountA.InputTokens)
+	assert.Equal(t, int64(22), accountA.OutputTokens)
+	assert.Equal(t, int64(5), accountA.CachedTokens)
+	assert.Equal(t, int64(2), accountA.RequestCount)
+
+	accountB := byUserAndAccount["Codex One:account-b"]
+	assert.Equal(t, int64(3), accountB.InputTokens)
+	assert.Equal(t, int64(4), accountB.OutputTokens)
+	assert.Equal(t, int64(7), accountB.CachedTokens)
+	assert.Equal(t, int64(1), accountB.RequestCount)
+
+	secondUser := byUserAndAccount["Codex Two:account-a"]
+	assert.Equal(t, int64(6), secondUser.InputTokens)
+	assert.Equal(t, int64(8), secondUser.OutputTokens)
+	assert.Equal(t, int64(0), secondUser.CachedTokens)
+	assert.Equal(t, int64(1), secondUser.RequestCount)
+}
+
+func TestAuditStore_GetCodexUserUsage(t *testing.T) {
+	store, _ := newTestAuditStore(t, 0, 1)
+	defer closeStore(t, store)
+	recordCodexRequest(store, "codex-user", "Codex User", "gpt-5", "account-b", 1, 2, 0)
+	recordCodexRequest(store, "codex-user", "Codex User", "gpt-5", "account-a", 10, 20, 5)
+	recordCodexRequest(store, "codex-user", "Codex User", "gpt-4.1", "account-a", 3, 4, -1)
+	recordCodexRequest(store, "other-user", "Other User", "gpt-5", "account-a", 100, 200, 50)
+	eventuallyCount(t, store.db, `SELECT COUNT(*) FROM request_log`, 4)
+
+	var userID int64
+	require.NoError(t, store.db.QueryRow(`SELECT id FROM users WHERE api_key = ?`, "codex-user").Scan(&userID))
+	entries, err := store.GetCodexUserUsage(userID, "24h")
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	assert.Equal(t, "account-a", entries[0].CodexAccount)
+	assert.Equal(t, "gpt-4.1", entries[0].Model)
+	assert.Equal(t, int64(3), entries[0].InputTokens)
+	assert.Equal(t, int64(4), entries[0].OutputTokens)
+	assert.Equal(t, int64(0), entries[0].CachedTokens)
+	assert.Equal(t, int64(1), entries[0].RequestCount)
+
+	assert.Equal(t, "account-a", entries[1].CodexAccount)
+	assert.Equal(t, "gpt-5", entries[1].Model)
+	assert.Equal(t, int64(10), entries[1].InputTokens)
+	assert.Equal(t, int64(20), entries[1].OutputTokens)
+	assert.Equal(t, int64(5), entries[1].CachedTokens)
+	assert.Equal(t, int64(1), entries[1].RequestCount)
+
+	assert.Equal(t, "account-b", entries[2].CodexAccount)
+	assert.Equal(t, "gpt-5", entries[2].Model)
+	assert.Equal(t, int64(1), entries[2].InputTokens)
+	assert.Equal(t, int64(2), entries[2].OutputTokens)
+	assert.Equal(t, int64(1), entries[2].RequestCount)
+}
+
 func TestAuditStore_ListCaptures(t *testing.T) {
 	store, _ := newTestAuditStore(t, 0, 1)
 	defer closeStore(t, store)
@@ -563,7 +651,7 @@ func TestAuditStore_UserNameUpdate(t *testing.T) {
 	defer closeStore(t, store)
 
 	// First request with no name
-	store.RecordRequest(0, "key-alice", "", "model-a", "/v1/chat/completions", 200, 1, 2, 0, 10, 5.0, 3.0, nil, "")
+	store.RecordRequest(0, "key-alice", "", "model-a", "/v1/chat/completions", 200, 1, 2, 0, 10, 5.0, 3.0, nil, "", "")
 	eventuallyCount(t, store.db, `SELECT COUNT(*) FROM request_log`, 1)
 
 	users, err := store.ListUsers()
@@ -572,7 +660,7 @@ func TestAuditStore_UserNameUpdate(t *testing.T) {
 	assert.Equal(t, "", users[0].Name)
 
 	// Second request with a name — should update
-	store.RecordRequest(0, "key-alice", "Alice", "model-a", "/v1/chat/completions", 200, 3, 4, 0, 10, 5.0, 3.0, nil, "")
+	store.RecordRequest(0, "key-alice", "Alice", "model-a", "/v1/chat/completions", 200, 3, 4, 0, 10, 5.0, 3.0, nil, "", "")
 	eventuallyCount(t, store.db, `SELECT COUNT(*) FROM request_log`, 2)
 
 	users, err = store.ListUsers()
@@ -581,7 +669,7 @@ func TestAuditStore_UserNameUpdate(t *testing.T) {
 	assert.Equal(t, "Alice", users[0].Name)
 
 	// Third request with updated name — should update again
-	store.RecordRequest(0, "key-alice", "Alice Updated", "model-a", "/v1/chat/completions", 200, 5, 6, 0, 10, 5.0, 3.0, nil, "")
+	store.RecordRequest(0, "key-alice", "Alice Updated", "model-a", "/v1/chat/completions", 200, 5, 6, 0, 10, 5.0, 3.0, nil, "", "")
 	eventuallyCount(t, store.db, `SELECT COUNT(*) FROM request_log`, 3)
 
 	users, err = store.ListUsers()

@@ -85,7 +85,7 @@ func (s *AuditStore) Close() error {
 	return s.db.Close()
 }
 
-func (s *AuditStore) RecordRequest(metricID int, apiKey, userName, model, reqPath string, statusCode int, inputTokens, outputTokens, cachedTokens int, durationMs int, tokensPerSecond, promptPerSecond float64, captureData []byte, fingerprint string) {
+func (s *AuditStore) RecordRequest(metricID int, apiKey, userName, model, reqPath string, statusCode int, inputTokens, outputTokens, cachedTokens int, durationMs int, tokensPerSecond, promptPerSecond float64, captureData []byte, fingerprint string, codexAccount string) {
 	select {
 	case <-s.doneCh:
 		return
@@ -106,6 +106,7 @@ func (s *AuditStore) RecordRequest(metricID int, apiKey, userName, model, reqPat
 		tokensPerSecond: tokensPerSecond,
 		promptPerSecond: promptPerSecond,
 		fingerprint:     fingerprint,
+		codexAccount:    codexAccount,
 	}
 	if captureData != nil {
 		event.captureData = append([]byte(nil), captureData...)

@@ -31,6 +31,25 @@ type ModelUsageEntry struct {
 	RequestCount int64  `json:"request_count"`
 }
 
+type CodexUsageEntry struct {
+	UserID       int64  `json:"user_id"`
+	Name         string `json:"name"`
+	CodexAccount string `json:"codex_account"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	CachedTokens int64  `json:"cached_tokens"`
+	RequestCount int64  `json:"request_count"`
+}
+
+type CodexUserUsageEntry struct {
+	CodexAccount string `json:"codex_account"`
+	Model        string `json:"model"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	CachedTokens int64  `json:"cached_tokens"`
+	RequestCount int64  `json:"request_count"`
+}
+
 type CaptureInfo struct {
 	ID        int64  `json:"id"`
 	SessionID int64  `json:"session_id"`
@@ -130,6 +149,73 @@ func (s *AuditStore) GetUserUsage(userID int64, period string) ([]ModelUsageEntr
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate user usage: %w", err)
+	}
+
+	return entries, nil
+}
+
+func (s *AuditStore) GetCodexUsage(period string) ([]CodexUsageEntry, error) {
+	since := periodSince(period)
+	rows, err := s.db.Query(`
+		SELECT u.id, u.name, rl.codex_account,
+			COALESCE(SUM(rl.input_tokens), 0),
+			COALESCE(SUM(rl.output_tokens), 0),
+			COALESCE(SUM(CASE WHEN rl.cached_tokens > 0 THEN rl.cached_tokens ELSE 0 END), 0),
+			COUNT(*)
+		FROM request_log rl
+		JOIN users u ON u.id = rl.user_id
+		WHERE rl.created_at >= ? AND rl.codex_account IS NOT NULL
+		GROUP BY u.id, u.name, rl.codex_account
+		ORDER BY u.id, rl.codex_account
+	`, since)
+	if err != nil {
+		return nil, fmt.Errorf("get codex usage: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]CodexUsageEntry, 0)
+	for rows.Next() {
+		var entry CodexUsageEntry
+		if err := rows.Scan(&entry.UserID, &entry.Name, &entry.CodexAccount, &entry.InputTokens, &entry.OutputTokens, &entry.CachedTokens, &entry.RequestCount); err != nil {
+			return nil, fmt.Errorf("scan codex usage: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate codex usage: %w", err)
+	}
+
+	return entries, nil
+}
+
+func (s *AuditStore) GetCodexUserUsage(userID int64, period string) ([]CodexUserUsageEntry, error) {
+	since := periodSince(period)
+	rows, err := s.db.Query(`
+		SELECT codex_account, model,
+			COALESCE(SUM(input_tokens), 0),
+			COALESCE(SUM(output_tokens), 0),
+			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN cached_tokens ELSE 0 END), 0),
+			COUNT(*)
+		FROM request_log
+		WHERE user_id = ? AND created_at >= ? AND codex_account IS NOT NULL
+		GROUP BY codex_account, model
+		ORDER BY codex_account, model
+	`, userID, since)
+	if err != nil {
+		return nil, fmt.Errorf("get codex user usage: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]CodexUserUsageEntry, 0)
+	for rows.Next() {
+		var entry CodexUserUsageEntry
+		if err := rows.Scan(&entry.CodexAccount, &entry.Model, &entry.InputTokens, &entry.OutputTokens, &entry.CachedTokens, &entry.RequestCount); err != nil {
+			return nil, fmt.Errorf("scan codex user usage: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate codex user usage: %w", err)
 	}
 
 	return entries, nil

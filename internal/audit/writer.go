@@ -21,6 +21,7 @@ type auditEvent struct {
 	promptPerSecond float64
 	captureData     []byte
 	fingerprint     string
+	codexAccount    string
 }
 
 type captureBatchItem struct {
@@ -147,9 +148,9 @@ func (s *AuditStore) insertRequestLogTx(tx *sql.Tx, userID int64, event auditEve
 	result, err := tx.Exec(`
 		INSERT INTO request_log (
 			metric_id, user_id, model, req_path, status_code, input_tokens, output_tokens,
-			cached_tokens, duration_ms, tokens_per_second, prompt_per_second
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, event.metricID, userID, event.model, event.reqPath, event.statusCode, event.inputTokens, event.outputTokens, event.cachedTokens, event.durationMs, event.tokensPerSecond, event.promptPerSecond)
+			cached_tokens, duration_ms, tokens_per_second, prompt_per_second, codex_account
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, event.metricID, userID, event.model, event.reqPath, event.statusCode, event.inputTokens, event.outputTokens, event.cachedTokens, event.durationMs, event.tokensPerSecond, event.promptPerSecond, sql.NullString{String: event.codexAccount, Valid: event.codexAccount != ""})
 	if err != nil {
 		return 0, fmt.Errorf("insert request_log: %w", err)
 	}
