@@ -190,7 +190,10 @@ func detectCacheHit(body []byte) bool {
 }
 
 func isFailureStatus(statusCode int) bool {
-	return statusCode >= 500 || statusCode == http.StatusTooManyRequests
+	return statusCode >= 500 ||
+		statusCode == http.StatusTooManyRequests ||
+		statusCode == http.StatusUnauthorized ||
+		statusCode == http.StatusForbidden
 }
 
 func humanSize(size int) string {

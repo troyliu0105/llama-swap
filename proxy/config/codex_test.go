@@ -155,6 +155,43 @@ peers:
 	assert.Equal(t, []string{"codex-mini", "codex-large"}, peer.Models)
 }
 
+func TestCodexConfig_DuplicateAccountNames(t *testing.T) {
+	content := `
+peers:
+  my-codex:
+    type: codex
+    models:
+      - codex-mini
+    codex:
+      accounts:
+        - name: personal
+        - name: work
+        - name: personal
+`
+	_, err := LoadConfigFromReader(strings.NewReader(content))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `duplicates account[0]`)
+	assert.Contains(t, err.Error(), `"personal"`)
+}
+
+func TestCodexConfig_DuplicateAccountNamesAdjacent(t *testing.T) {
+	content := `
+peers:
+  my-codex:
+    type: codex
+    models:
+      - codex-mini
+    codex:
+      accounts:
+        - name: work
+        - name: work
+`
+	_, err := LoadConfigFromReader(strings.NewReader(content))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `duplicates account[0]`)
+	assert.Contains(t, err.Error(), `"work"`)
+}
+
 func TestCodexConfig_MissingCodexBlock(t *testing.T) {
 	content := `
 peers:

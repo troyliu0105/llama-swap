@@ -28,8 +28,22 @@ func (c CodexConfig) Validate() error {
 			return fmt.Errorf("codex account[%d] name can not be empty", i)
 		}
 	}
+	if err := checkDuplicateAccountNames(c.Accounts); err != nil {
+		return err
+	}
 	if err := c.LoadBalance.Validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func checkDuplicateAccountNames(accounts []CodexAccountConfig) error {
+	seen := make(map[string]int)
+	for i, acct := range accounts {
+		if prev, exists := seen[acct.Name]; exists {
+			return fmt.Errorf("codex account[%d] name %q duplicates account[%d]", i, acct.Name, prev)
+		}
+		seen[acct.Name] = i
 	}
 	return nil
 }

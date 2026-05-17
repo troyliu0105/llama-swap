@@ -77,9 +77,13 @@ func RunListAccounts(authPath string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "ACCOUNT\tTOKEN STATUS")
 	for _, name := range accounts {
-		token, _ := store.GetToken(name)
+		token, err := store.GetToken(name)
+		if err != nil {
+			fmt.Fprintf(w, "%s\terror: %s\n", name, err)
+			continue
+		}
 		status := "expired"
-		if token != nil && time.Now().Unix() < token.ExpiresAt-tokenExpiryLeeway {
+		if time.Now().Unix() < token.ExpiresAt-tokenExpiryLeeway {
 			status = "valid"
 		}
 		fmt.Fprintf(w, "%s\t%s\n", name, status)

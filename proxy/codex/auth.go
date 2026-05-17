@@ -214,15 +214,19 @@ func (s *AuthStore) GetToken(accountName string) (*TokenData, error) {
 	if !ok {
 		return nil, fmt.Errorf("codex account %q not found", accountName)
 	}
+	if token == nil {
+		return nil, fmt.Errorf("codex account %q has nil token entry", accountName)
+	}
 	return token, nil
 }
 
 func (s *AuthStore) SetToken(accountName string, token *TokenData) error {
-	s.mu.Lock()
-	if s.deleted[accountName] {
-		s.mu.Unlock()
-		return fmt.Errorf("codex account %q has been removed", accountName)
+	if token == nil {
+		return fmt.Errorf("codex account %q token can not be nil", accountName)
 	}
+
+	s.mu.Lock()
+	delete(s.deleted, accountName)
 	s.tokens[accountName] = token
 	s.mu.Unlock()
 

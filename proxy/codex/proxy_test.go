@@ -208,6 +208,69 @@ func TestProxy_RecordStreamingResponseAndError_RecordFailures(t *testing.T) {
 	assert.NotEqual(t, account, selected)
 }
 
+func TestProxy_IsFailureStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		expected   bool
+	}{
+		{"200 OK", http.StatusOK, false},
+		{"400 Bad Request", http.StatusBadRequest, false},
+		{"401 Unauthorized", http.StatusUnauthorized, true},
+		{"403 Forbidden", http.StatusForbidden, true},
+		{"429 Too Many Requests", http.StatusTooManyRequests, true},
+		{"500 Internal Server Error", http.StatusInternalServerError, true},
+		{"502 Bad Gateway", http.StatusBadGateway, true},
+		{"503 Service Unavailable", http.StatusServiceUnavailable, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isFailureStatus(tt.statusCode))
+		})
+	}
+}
+
+func TestProxy_RecordResponse_AuthFailuresCauseFailover(t *testing.T) {
+	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			p := newTestProxy(t, []string{"acct1", "acct2"})
+			p.balancer = NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+			account, err := p.balancer.Select("model-a")
+			require.NoError(t, err)
+
+			for i := 0; i < p.balancer.maxFails; i++ {
+				p.RecordResponse("model-a", account, statusCode, nil)
+			}
+
+			selected, err := p.balancer.Select("model-a")
+			require.NoError(t, err)
+			assert.NotEqual(t, account, selected, "balancer should fail over after repeated %d responses", statusCode)
+		})
+	}
+}
+
+func TestProxy_RecordStreamingResponse_AuthFailuresCauseFailover(t *testing.T) {
+	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			p := newTestProxy(t, []string{"acct1", "acct2"})
+			p.balancer = NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+			account, err := p.balancer.Select("model-a")
+			require.NoError(t, err)
+
+			for i := 0; i < p.balancer.maxFails; i++ {
+				p.RecordStreamingResponse("model-a", account, statusCode)
+			}
+
+			selected, err := p.balancer.Select("model-a")
+			require.NoError(t, err)
+			assert.NotEqual(t, account, selected, "balancer should fail over after repeated %d streaming responses", statusCode)
+		})
+	}
+}
+
 func TestProxy_GenerateSessionID(t *testing.T) {
 	p := newTestProxy(t, []string{"acct1"})
 

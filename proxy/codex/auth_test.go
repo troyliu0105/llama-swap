@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -175,4 +176,104 @@ func TestAuthStore_RoundTripJSON(t *testing.T) {
 	assert.Equal(t, "id-1", loaded["acct1"].AccountID)
 	assert.Equal(t, "access2", loaded["acct2"].AccessToken)
 	assert.Empty(t, loaded["acct2"].AccountID)
+}
+
+func TestAuthStore_GetToken_NilEntry(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "auth.json")
+	require.NoError(t, os.WriteFile(fp, []byte(`{"bad_acct": null}`), 0600))
+
+	store := NewAuthStore(fp)
+	require.NoError(t, store.Load())
+
+	_, err := store.GetToken("bad_acct")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nil token entry")
+}
+
+func TestAuthStore_SetToken_NilRejected(t *testing.T) {
+	store := newTestAuthStore(t)
+
+	err := store.SetToken("acct1", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "token can not be nil")
+	assert.Empty(t, store.ListAccounts())
+}
+
+func TestAuthStore_GetValidToken_NilEntry(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "auth.json")
+	require.NoError(t, os.WriteFile(fp, []byte(`{"bad_acct": null}`), 0600))
+
+	store := NewAuthStore(fp)
+	require.NoError(t, store.Load())
+
+	_, err := store.GetValidToken("bad_acct")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nil token entry")
+}
+
+func TestAuthStore_RemoveThenRelogin(t *testing.T) {
+	store := newTestAuthStore(t)
+
+	token1 := &TokenData{AccessToken: "first", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	require.NoError(t, store.SetToken("acct1", token1))
+
+	require.NoError(t, store.RemoveToken("acct1"))
+	_, err := store.GetToken("acct1")
+	assert.Error(t, err)
+
+	token2 := &TokenData{AccessToken: "second", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	require.NoError(t, store.SetToken("acct1", token2))
+
+	got, err := store.GetToken("acct1")
+	require.NoError(t, err)
+	assert.Equal(t, "second", got.AccessToken)
+}
+
+func TestAuthStore_RunListAccounts_NilEntry(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "auth.json")
+	require.NoError(t, os.WriteFile(fp, []byte(`{
+		"good_acct": {"access_token":"tok","refresh_token":"rt","expires_at":9999999999},
+		"bad_acct": null
+	}`), 0600))
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	oldStdout := os.Stdout
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+	})
+	os.Stdout = w
+
+	err = RunListAccounts(fp)
+	w.Close()
+	require.NoError(t, err)
+
+	output, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+
+	text := string(output)
+	assert.Contains(t, text, "ACCOUNT")
+	assert.Contains(t, text, "good_acct")
+	assert.Contains(t, text, "valid")
+	assert.Contains(t, text, "bad_acct")
+	assert.Contains(t, text, "error: codex account \"bad_acct\" has nil token entry")
+}
+
+func TestAuthStore_Load_NilEntriesPreservedInMap(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "auth.json")
+	require.NoError(t, os.WriteFile(fp, []byte(`{"a": null, "b": null}`), 0600))
+
+	store := NewAuthStore(fp)
+	require.NoError(t, store.Load())
+
+	accounts := store.ListAccounts()
+	assert.Equal(t, []string{"a", "b"}, accounts)
+
+	_, err := store.GetToken("a")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nil token entry")
 }
