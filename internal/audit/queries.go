@@ -319,3 +319,43 @@ func maskAPIKey(apiKey string) string {
 	}
 	return apiKey[:8] + "..."
 }
+
+func (s *AuditStore) SaveCodexQuotaSnapshot(accountName string, snapshotJSON []byte) error {
+	_, err := s.db.Exec(`
+		INSERT INTO codex_quota_snapshots (account_name, snapshot, updated_at)
+		VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(account_name) DO UPDATE SET
+			snapshot = excluded.snapshot,
+			updated_at = CURRENT_TIMESTAMP
+	`, accountName, string(snapshotJSON))
+	if err != nil {
+		return fmt.Errorf("save codex quota snapshot for %q: %w", accountName, err)
+	}
+	return nil
+}
+
+type CodexQuotaSnapshotRow struct {
+	AccountName string
+	Snapshot    string
+}
+
+func (s *AuditStore) LoadCodexQuotaSnapshots() ([]CodexQuotaSnapshotRow, error) {
+	rows, err := s.db.Query(`SELECT account_name, snapshot FROM codex_quota_snapshots`)
+	if err != nil {
+		return nil, fmt.Errorf("load codex quota snapshots: %w", err)
+	}
+	defer rows.Close()
+
+	var result []CodexQuotaSnapshotRow
+	for rows.Next() {
+		var row CodexQuotaSnapshotRow
+		if err := rows.Scan(&row.AccountName, &row.Snapshot); err != nil {
+			return nil, fmt.Errorf("scan codex quota snapshot: %w", err)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate codex quota snapshots: %w", err)
+	}
+	return result, nil
+}

@@ -734,3 +734,45 @@ func (pm *ProxyManager) apiAuditCaptures(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, captures)
 }
+
+func (pm *ProxyManager) wireCodexQuotaPersistence(auditStore *audit.AuditStore) {
+	if pm.peerProxy == nil {
+		return
+	}
+	codexProxies := pm.peerProxy.GetCodexProxies()
+
+	for _, proxy := range codexProxies {
+		if proxy == nil {
+			continue
+		}
+		proxy.SetOnQuotaPersist(func(account string, snapshot codex.QuotaSnapshot) {
+			data, err := json.Marshal(snapshot)
+			if err != nil {
+				return
+			}
+			if err := auditStore.SaveCodexQuotaSnapshot(account, data); err != nil {
+				pm.proxyLogger.Warnf("failed to persist codex quota snapshot for %q: %v", account, err)
+			}
+		})
+	}
+
+	rows, err := auditStore.LoadCodexQuotaSnapshots()
+	if err != nil {
+		pm.proxyLogger.Warnf("failed to load codex quota snapshots: %v", err)
+		return
+	}
+	for _, row := range rows {
+		var snapshot codex.QuotaSnapshot
+		if err := json.Unmarshal([]byte(row.Snapshot), &snapshot); err != nil {
+			continue
+		}
+		for _, proxy := range codexProxies {
+			if proxy != nil {
+				proxy.RestoreQuotaSnapshots(map[string]codex.QuotaSnapshot{row.AccountName: snapshot})
+			}
+		}
+	}
+	if len(rows) > 0 {
+		pm.proxyLogger.Infof("restored %d codex quota snapshots from database", len(rows))
+	}
+}

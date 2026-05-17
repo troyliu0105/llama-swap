@@ -16,13 +16,16 @@ const (
 	OpenCodeVersion = "1.0.0"
 )
 
+type QuotaPersistFunc func(account string, snapshot QuotaSnapshot)
+
 type Proxy struct {
-	peerID     string
-	auth       *AuthStore
-	balancer   *Balancer
-	transport  *http.Transport
-	logger     func(format string, args ...any)
-	quotaStore *QuotaStore
+	peerID         string
+	auth           *AuthStore
+	balancer       *Balancer
+	transport      *http.Transport
+	logger         func(format string, args ...any)
+	quotaStore     *QuotaStore
+	onQuotaPersist QuotaPersistFunc
 
 	sessionCounter atomic.Uint64
 }
@@ -196,6 +199,16 @@ func (p *Proxy) ListAccounts() []string {
 	return p.auth.ListAccounts()
 }
 
+func (p *Proxy) SetOnQuotaPersist(fn QuotaPersistFunc) {
+	p.onQuotaPersist = fn
+}
+
+func (p *Proxy) RestoreQuotaSnapshots(snapshots map[string]QuotaSnapshot) {
+	for account, snapshot := range snapshots {
+		p.quotaStore.Restore(account, snapshot)
+	}
+}
+
 func (p *Proxy) recordQuotaHeaders(account string, headers http.Header) {
 	if headers == nil || account == "" || p.quotaStore == nil {
 		return
@@ -206,6 +219,9 @@ func (p *Proxy) recordQuotaHeaders(account string, headers http.Header) {
 		snapshot.ModelLimits = modelLimits
 	}
 	p.quotaStore.Update(account, snapshot)
+	if p.onQuotaPersist != nil {
+		p.onQuotaPersist(account, snapshot)
+	}
 }
 
 func (p *Proxy) generateSessionID() string {

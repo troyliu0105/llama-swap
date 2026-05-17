@@ -67,6 +67,19 @@ func (s *QuotaStore) Update(account string, snapshot QuotaSnapshot) {
 	s.snapshots[account] = &copied
 }
 
+func (s *QuotaStore) Restore(account string, snapshot QuotaSnapshot) {
+	if s == nil || account == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.snapshots[account]; !exists {
+		copied := cloneQuotaSnapshot(snapshot)
+		s.snapshots[account] = &copied
+	}
+}
+
 func (s *QuotaStore) Get(account string) (*QuotaSnapshot, bool) {
 	if s == nil {
 		return nil, false
