@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"mime/multipart"
 	"net/http"
@@ -17,10 +18,18 @@ import (
 	"time"
 
 	"github.com/mostlygeek/llama-swap/event"
+	"github.com/mostlygeek/llama-swap/proxy/codex"
 	"github.com/mostlygeek/llama-swap/proxy/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // TestResponseRecorder adds CloseNotify to httptest.ResponseRecorder.
 // "If you want to write your own tests around streams you will need a Recorder that can handle CloseNotifier."
@@ -1985,4 +1994,85 @@ models:
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), "/messages")
 	})
+}
+
+func TestProxyManager_VersionlessResponses_CodexPeerStreamsAndRecordsUsage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	store := codex.NewAuthStore(codex.DefaultAuthPath())
+	require.NoError(t, store.SetToken("acct1", &codex.TokenData{
+		AccessToken:  "tok-acct1",
+		RefreshToken: "refresh-acct1",
+		ExpiresAt:    time.Now().Add(24 * time.Hour).Unix(),
+		AccountID:    "acctid-acct1",
+	}))
+
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+peers:
+  codex-peer:
+    type: codex
+    models:
+      - codex-model
+    codex:
+      accounts:
+        - name: acct1
+models:
+  local-model:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond local-model
+`)
+
+	proxy := New(cfg)
+	defer proxy.StopProcesses(StopImmediately)
+
+	pp := proxy.peerProxy.proxyMap["codex-model"]
+	require.NotNil(t, pp)
+
+	pp.reverseProxy.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		assert.Equal(t, "https", req.URL.Scheme)
+		assert.Equal(t, "chatgpt.com", req.URL.Host)
+		assert.Equal(t, "/backend-api/codex/responses", req.URL.Path)
+		assert.Equal(t, "chatgpt.com", req.Host)
+		assert.Equal(t, "Bearer tok-acct1", req.Header.Get("Authorization"))
+
+		body := strings.Join([]string{
+			"event: response.output_text.delta",
+			`data: {"type":"response.output_text.delta","delta":"Hello"}`,
+			"",
+			"event: response.completed",
+			`data: {"type":"response.completed","response":{"usage":{"input_tokens":20,"input_tokens_details":{"cached_tokens":3},"output_tokens":34,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":54}}}`,
+			"",
+		}, "\n")
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header: http.Header{
+				"Content-Type": []string{"text/plain; charset=utf-8"},
+			},
+			Body:          io.NopCloser(strings.NewReader(body)),
+			ContentLength: -1,
+			Request:       req,
+		}, nil
+	})
+
+	reqBody := `{"model":"codex-model","input":[{"role":"user","content":"hi"}],"stream":true}`
+	req := httptest.NewRequest("POST", "/v/responses", bytes.NewBufferString(reqBody))
+	w := CreateTestResponseRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
+	assert.Equal(t, "no", w.Header().Get("X-Accel-Buffering"))
+	assert.Contains(t, w.Body.String(), "response.output_text.delta")
+
+	metrics := proxy.metricsMonitor.getMetrics()
+	require.Len(t, metrics, 1)
+	assert.Equal(t, "codex-model", metrics[0].Model)
+	assert.Equal(t, "/backend-api/codex/responses", metrics[0].ReqPath)
+	assert.Equal(t, 20, metrics[0].Tokens.InputTokens)
+	assert.Equal(t, 34, metrics[0].Tokens.OutputTokens)
+	assert.Equal(t, 3, metrics[0].Tokens.CachedTokens)
 }

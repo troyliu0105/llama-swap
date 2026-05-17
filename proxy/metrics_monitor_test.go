@@ -289,6 +289,41 @@ data: [DONE]
 		assert.Equal(t, 20, metrics[0].Tokens.OutputTokens)
 	})
 
+	t.Run("codex responses stream extracts completed usage", func(t *testing.T) {
+		mm := newMetricsMonitor(testLogger, 10, 0, nil)
+
+		responseBody := `event: response.created
+data: {"type":"response.created","response":{"usage":null}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"Hello"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"usage":{"input_tokens":20,"input_tokens_details":{"cached_tokens":3},"output_tokens":34,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":54}}}
+
+`
+
+		nextHandler := func(modelID string, w http.ResponseWriter, r *http.Request) error {
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(responseBody))
+			return nil
+		}
+
+		req := httptest.NewRequest("POST", "/v1/responses", nil)
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+
+		err := mm.wrapHandler("gpt-5.4-mini", ginCtx.Writer, req, captureAll, "", nextHandler)
+		assert.NoError(t, err)
+
+		metrics := mm.getMetrics()
+		assert.Equal(t, 1, len(metrics))
+		assert.Equal(t, 20, metrics[0].Tokens.InputTokens)
+		assert.Equal(t, 34, metrics[0].Tokens.OutputTokens)
+		assert.Equal(t, 3, metrics[0].Tokens.CachedTokens)
+	})
+
 	t.Run("non-OK status code records partial metrics", func(t *testing.T) {
 		mm := newMetricsMonitor(testLogger, 10, 0, nil)
 
@@ -473,6 +508,18 @@ data: [DONE]
 		assert.Equal(t, 0, metrics[0].Tokens.InputTokens)
 		assert.Equal(t, 0, metrics[0].Tokens.OutputTokens)
 	})
+}
+
+func TestProxyManager_InferCaptureContentTypes(t *testing.T) {
+	capture := &ReqRespCapture{
+		ReqBody:  []byte(`{"model":"gpt-5.4-mini"}`),
+		RespBody: []byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"),
+	}
+
+	inferCaptureContentTypes(capture)
+
+	assert.Equal(t, "application/json", capture.ReqHeaders["Content-Type"])
+	assert.Equal(t, "text/event-stream; charset=utf-8", capture.RespHeaders["Content-Type"])
 }
 
 func TestMetricsMonitor_ResponseBodyCopier(t *testing.T) {

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -367,6 +368,7 @@ func (pm *ProxyManager) apiGetCapture(c *gin.Context) {
 	// collisions (metric IDs reset to 0 on each process restart).
 	capture := pm.metricsMonitor.getCaptureByID(id)
 	if capture != nil && !(capture.ReqPath == "" && capture.ReqHeaders == nil && capture.ReqBody == nil && capture.RespHeaders == nil && capture.RespBody == nil) {
+		inferCaptureContentTypes(capture)
 		jsonBytes, err := json.Marshal(capture)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal capture"})
@@ -392,6 +394,7 @@ func (pm *ProxyManager) apiGetCapture(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decompress capture"})
 			return
 		}
+		inferCaptureContentTypes(capture)
 		jsonBytes, err := json.Marshal(capture)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal capture"})
@@ -402,6 +405,54 @@ func (pm *ProxyManager) apiGetCapture(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusNotFound, gin.H{"error": "capture not found"})
+}
+
+func inferCaptureContentTypes(capture *ReqRespCapture) {
+	if capture == nil {
+		return
+	}
+	if getHeaderValue(capture.RespHeaders, "Content-Type") == "" {
+		if contentType := inferBodyContentType(capture.RespBody); contentType != "" {
+			if capture.RespHeaders == nil {
+				capture.RespHeaders = make(map[string]string)
+			}
+			capture.RespHeaders["Content-Type"] = contentType
+		}
+	}
+	if getHeaderValue(capture.ReqHeaders, "Content-Type") == "" {
+		if contentType := inferBodyContentType(capture.ReqBody); contentType != "" {
+			if capture.ReqHeaders == nil {
+				capture.ReqHeaders = make(map[string]string)
+			}
+			capture.ReqHeaders["Content-Type"] = contentType
+		}
+	}
+}
+
+func getHeaderValue(headers map[string]string, name string) string {
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return value
+		}
+	}
+	return ""
+}
+
+func inferBodyContentType(body []byte) string {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	if bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:")) {
+		return "text/event-stream; charset=utf-8"
+	}
+	if json.Valid(trimmed) {
+		return "application/json"
+	}
+	if http.DetectContentType(trimmed) == "text/plain; charset=utf-8" {
+		return "text/plain; charset=utf-8"
+	}
+	return ""
 }
 
 func (pm *ProxyManager) apiAuditUsers(c *gin.Context) {
