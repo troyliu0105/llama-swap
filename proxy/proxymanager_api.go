@@ -484,11 +484,11 @@ func (pm *ProxyManager) apiCodexAccounts(c *gin.Context) {
 		return
 	}
 
-	accounts := collectCodexAccounts(codexProxies)
+	accounts := collectCodexAccounts(codexProxies, pm.auditStore)
 	c.JSON(http.StatusOK, accounts)
 }
 
-func collectCodexAccounts(codexProxies map[string]*codex.Proxy) []codexAccountInfo {
+func collectCodexAccounts(codexProxies map[string]*codex.Proxy, auditStore *audit.AuditStore) []codexAccountInfo {
 	accounts := make(map[string]*codexAccountInfo)
 	quotaCapturedAt := make(map[string]time.Time)
 	ensureAccount := func(name string) *codexAccountInfo {
@@ -550,6 +550,28 @@ func collectCodexAccounts(codexProxies map[string]*codex.Proxy) []codexAccountIn
 			account.Stats.CacheHits += stats.CacheHits
 			if account.Stats.TotalReqs > 0 {
 				account.Stats.CacheHitRate = float64(account.Stats.CacheHits) / float64(account.Stats.TotalReqs)
+			}
+		}
+	}
+
+	if auditStore != nil {
+		persisted, err := auditStore.GetCodexAccountStats()
+		if err == nil {
+			for _, ps := range persisted {
+				if ps.CodexAccount == "" {
+					continue
+				}
+				account := ensureAccount(ps.CodexAccount)
+				if account.Stats == nil {
+					account.Stats = &codex.AccountStatsSnapshot{
+						Name: ps.CodexAccount,
+					}
+				}
+				account.Stats.TotalReqs += ps.TotalRequests
+				account.Stats.CacheHits += ps.CacheHits
+				if account.Stats.TotalReqs > 0 {
+					account.Stats.CacheHitRate = float64(account.Stats.CacheHits) / float64(account.Stats.TotalReqs)
+				}
 			}
 		}
 	}

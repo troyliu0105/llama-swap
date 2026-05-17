@@ -500,6 +500,44 @@ func TestAuditStore_GetUserUsage(t *testing.T) {
 	assert.Equal(t, int64(1), entries[1].RequestCount)
 }
 
+func TestAuditStore_GetCodexAccountStats_NoData(t *testing.T) {
+	store, _ := newTestAuditStore(t, 0, 1)
+	defer closeStore(t, store)
+
+	entries, err := store.GetCodexAccountStats()
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestAuditStore_GetCodexAccountStats(t *testing.T) {
+	store, _ := newTestAuditStore(t, 0, 1)
+	defer closeStore(t, store)
+	recordCodexRequest(store, "key1", "User1", "gpt-5", "account-a", 10, 20, 5)
+	recordCodexRequest(store, "key1", "User1", "gpt-5", "account-a", 1, 2, 0)
+	recordCodexRequest(store, "key1", "User1", "gpt-5", "account-b", 3, 4, 7)
+	recordRequest(store, "key1", "local-model", "/v1/chat/completions", 100, 200, 50, nil, "")
+	eventuallyCount(t, store.db, `SELECT COUNT(*) FROM request_log`, 4)
+
+	entries, err := store.GetCodexAccountStats()
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+
+	byAccount := map[string]CodexAccountStatsEntry{}
+	for _, e := range entries {
+		byAccount[e.CodexAccount] = e
+	}
+
+	a := byAccount["account-a"]
+	assert.Equal(t, int64(2), a.TotalRequests)
+	assert.Equal(t, int64(1), a.CacheHits)
+	assert.InDelta(t, 0.5, a.CacheHitRate, 0.001)
+
+	b := byAccount["account-b"]
+	assert.Equal(t, int64(1), b.TotalRequests)
+	assert.Equal(t, int64(1), b.CacheHits)
+	assert.InDelta(t, 1.0, b.CacheHitRate, 0.001)
+}
+
 func TestAuditStore_GetCodexUsage_NoData(t *testing.T) {
 	store, _ := newTestAuditStore(t, 0, 1)
 	defer closeStore(t, store)

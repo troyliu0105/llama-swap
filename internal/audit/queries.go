@@ -41,6 +41,13 @@ type CodexUsageEntry struct {
 	RequestCount int64  `json:"request_count"`
 }
 
+type CodexAccountStatsEntry struct {
+	CodexAccount  string  `json:"codex_account"`
+	TotalRequests int64   `json:"totalRequests"`
+	CacheHits     int64   `json:"cacheHits"`
+	CacheHitRate  float64 `json:"cacheHitRate"`
+}
+
 type CodexUserUsageEntry struct {
 	CodexAccount string `json:"codex_account"`
 	Model        string `json:"model"`
@@ -149,6 +156,39 @@ func (s *AuditStore) GetUserUsage(userID int64, period string) ([]ModelUsageEntr
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate user usage: %w", err)
+	}
+
+	return entries, nil
+}
+
+func (s *AuditStore) GetCodexAccountStats() ([]CodexAccountStatsEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT codex_account,
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0)
+		FROM request_log
+		WHERE codex_account IS NOT NULL
+		GROUP BY codex_account
+		ORDER BY codex_account
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("get codex account stats: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]CodexAccountStatsEntry, 0)
+	for rows.Next() {
+		var entry CodexAccountStatsEntry
+		if err := rows.Scan(&entry.CodexAccount, &entry.TotalRequests, &entry.CacheHits); err != nil {
+			return nil, fmt.Errorf("scan codex account stats: %w", err)
+		}
+		if entry.TotalRequests > 0 {
+			entry.CacheHitRate = float64(entry.CacheHits) / float64(entry.TotalRequests)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate codex account stats: %w", err)
 	}
 
 	return entries, nil
