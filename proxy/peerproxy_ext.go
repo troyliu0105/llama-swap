@@ -154,6 +154,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: peerTimeout,
 			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
 			IdleConnTimeout:       90 * time.Second,
