@@ -160,6 +160,15 @@ func TestEnhancedPeerProxy_PrefixPeerModels(t *testing.T) {
 	assert.Equal(t, "my-model", pm.GetOriginalModelName("peer1/my-model"))
 }
 
+func TestEnhancedPeerProxy_NormalizesCodexStreamContentType(t *testing.T) {
+	assert.True(t, shouldNormalizeCodexStreamContentType("", true, true))
+	assert.True(t, shouldNormalizeCodexStreamContentType("text/plain", true, true))
+	assert.True(t, shouldNormalizeCodexStreamContentType("text/plain; charset=utf-8", true, true))
+	assert.False(t, shouldNormalizeCodexStreamContentType("application/json", true, true))
+	assert.False(t, shouldNormalizeCodexStreamContentType("", false, true))
+	assert.False(t, shouldNormalizeCodexStreamContentType("", true, false))
+}
+
 func TestEnhancedPeerProxy_ConcurrencyControl(t *testing.T) {
 	var concurrentCount int32
 	var maxConcurrent int32

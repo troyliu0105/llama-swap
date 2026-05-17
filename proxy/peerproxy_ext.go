@@ -222,10 +222,11 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 		reverseProxy.ModifyResponse = func(resp *http.Response) error {
 			contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 			isSSE := strings.Contains(contentType, "text/event-stream")
+			isStreamingRequest, _ := resp.Request.Context().Value(proxyCtxKey("streaming")).(bool)
 
-			// Codex API returns SSE-formatted responses with text/plain content-type.
-			// Normalize to text/event-stream so downstream handlers (metrics, UI) work correctly.
-			if !isSSE && pp.codexProxy != nil && strings.Contains(contentType, "text/plain") {
+			// Codex API stream responses can arrive as text/plain or with no content-type;
+			// normalize them so metrics, audit captures, and the UI all treat them as SSE.
+			if !isSSE && shouldNormalizeCodexStreamContentType(contentType, pp.codexProxy != nil, isStreamingRequest) {
 				isSSE = true
 				resp.Header.Set("Content-Type", "text/event-stream; charset=utf-8")
 			}
@@ -389,6 +390,14 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 		prefixedModels:   prefixedModels,
 		prefixPeerModels: prefixPeerModels,
 	}, nil
+}
+
+func shouldNormalizeCodexStreamContentType(contentType string, isCodex bool, isStreamingRequest bool) bool {
+	if !isCodex || !isStreamingRequest {
+		return false
+	}
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	return contentType == "" || strings.Contains(contentType, "text/plain")
 }
 
 // HasPeerModel checks if a model exists in the peer proxy map
