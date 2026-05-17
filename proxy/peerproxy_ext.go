@@ -246,7 +246,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 					if acc, ok := resp.Request.Context().Value(codexAccountKey{}).(string); ok {
 						account = acc
 					}
-					pp.codexProxy.RecordStreamingResponse(model, account, resp.StatusCode)
+					pp.codexProxy.RecordStreamingResponse(model, account, resp.StatusCode, resp.Header)
 				}
 				peerLog("[PEER] ◀ %s | %s | %d SSE | %s\n", getPeerReqID(resp.Request), model, resp.StatusCode, pp.peerID)
 				return nil
@@ -300,7 +300,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 				if acc, ok := resp.Request.Context().Value(codexAccountKey{}).(string); ok {
 					account = acc
 				}
-				pp.codexProxy.RecordResponse(model, account, resp.StatusCode, body)
+				pp.codexProxy.RecordResponse(model, account, resp.StatusCode, body, resp.Header)
 			}
 
 			if proxyLogger.IsLevelEnabled(logmon.LevelTrace) && readErr == nil {
@@ -424,6 +424,16 @@ func (p *EnhancedPeerProxy) GetPeerFilters(modelID string) config.Filters {
 // ListPeers returns the peer dictionary configuration
 func (p *EnhancedPeerProxy) ListPeers() config.PeerDictionaryExtConfig {
 	return p.peers
+}
+
+func (p *EnhancedPeerProxy) GetCodexProxies() map[string]*codex.Proxy {
+	out := make(map[string]*codex.Proxy)
+	for id, member := range p.proxyMap {
+		if member.codexProxy != nil {
+			out[id] = member.codexProxy
+		}
+	}
+	return out
 }
 
 // GetOriginalModelName returns the original model name, stripping peer prefix if applicable

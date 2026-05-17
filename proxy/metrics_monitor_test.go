@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -15,8 +18,10 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/mostlygeek/llama-swap/event"
+	"github.com/mostlygeek/llama-swap/internal/audit"
 	"github.com/mostlygeek/llama-swap/proxy/cache"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
@@ -508,6 +513,37 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":20,"input
 		assert.Equal(t, 0, metrics[0].Tokens.InputTokens)
 		assert.Equal(t, 0, metrics[0].Tokens.OutputTokens)
 	})
+}
+
+func TestMetricsMonitor_RecordAudit_CodexAccountFromContext(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := audit.NewAuditStore(dbPath, 0, 1, 1, nil)
+	require.NoError(t, err)
+
+	mm := newMetricsMonitor(testLogger, 10, 0, nil)
+	mm.SetAuditStore(store)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req = req.WithContext(context.WithValue(req.Context(), codexAccountKey{}, "codex-account-a"))
+
+	mm.recordAudit(req, "api-key", "/v1/chat/completions", nil, ActivityLogEntry{
+		ID:             42,
+		Model:          "gpt-5",
+		ReqPath:        "/v1/chat/completions",
+		RespStatusCode: http.StatusOK,
+		Tokens: TokenMetrics{
+			InputTokens:  10,
+			OutputTokens: 20,
+		},
+	}, nil)
+	require.NoError(t, store.Close())
+
+	db, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var codexAccount string
+	require.NoError(t, db.QueryRow(`SELECT codex_account FROM request_log WHERE metric_id = ?`, 42).Scan(&codexAccount))
+	assert.Equal(t, "codex-account-a", codexAccount)
 }
 
 func TestProxyManager_InferCaptureContentTypes(t *testing.T) {

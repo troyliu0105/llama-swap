@@ -348,7 +348,7 @@ func (mp *metricsMonitor) wrapHandler(
 		mp.logger.Warnf("non-200 response, recording partial metrics: status=%d, path=%s", recorder.Status(), request.URL.Path)
 		tm.ID = mp.queueMetrics(tm)
 		mp.emitMetric(tm)
-		mp.recordAudit(apiKey, request.URL.Path, reqBody, tm, nil)
+		mp.recordAudit(request, apiKey, request.URL.Path, reqBody, tm, nil)
 		return nil
 	}
 
@@ -357,7 +357,7 @@ func (mp *metricsMonitor) wrapHandler(
 		mp.logger.Warn("metrics: empty body, recording minimal metrics")
 		tm.ID = mp.queueMetrics(tm)
 		mp.emitMetric(tm)
-		mp.recordAudit(apiKey, request.URL.Path, reqBody, tm, nil)
+		mp.recordAudit(request, apiKey, request.URL.Path, reqBody, tm, nil)
 		return nil
 	}
 
@@ -369,7 +369,7 @@ func (mp *metricsMonitor) wrapHandler(
 			mp.logger.Warnf("metrics: decompression failed: %v, path=%s, recording minimal metrics", err, request.URL.Path)
 			tm.ID = mp.queueMetrics(tm)
 			mp.emitMetric(tm)
-			mp.recordAudit(apiKey, request.URL.Path, reqBody, tm, nil)
+			mp.recordAudit(request, apiKey, request.URL.Path, reqBody, tm, nil)
 			return nil
 		}
 	}
@@ -464,12 +464,12 @@ func (mp *metricsMonitor) wrapHandler(
 	}
 
 	mp.emitMetric(tm)
-	mp.recordAudit(apiKey, request.URL.Path, reqBody, tm, capture)
+	mp.recordAudit(request, apiKey, request.URL.Path, reqBody, tm, capture)
 
 	return nil
 }
 
-func (mp *metricsMonitor) recordAudit(apiKey, reqPath string, reqBody []byte, tm ActivityLogEntry, capture *ReqRespCapture) {
+func (mp *metricsMonitor) recordAudit(request *http.Request, apiKey, reqPath string, reqBody []byte, tm ActivityLogEntry, capture *ReqRespCapture) {
 	if mp.auditStore == nil {
 		return
 	}
@@ -498,11 +498,13 @@ func (mp *metricsMonitor) recordAudit(apiKey, reqPath string, reqBody []byte, tm
 		userName = cfg.Name
 	}
 
+	codexAccount, _ := request.Context().Value(codexAccountKey{}).(string)
+
 	mp.auditStore.RecordRequest(
 		tm.ID, apiKey, userName, tm.Model, tm.ReqPath, tm.RespStatusCode,
 		tm.Tokens.InputTokens, tm.Tokens.OutputTokens, tm.Tokens.CachedTokens,
 		tm.DurationMs, tm.Tokens.TokensPerSecond, tm.Tokens.PromptPerSecond,
-		captureData, fingerprint,
+		captureData, fingerprint, codexAccount,
 	)
 }
 

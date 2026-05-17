@@ -13,7 +13,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/mostlygeek/llama-swap/event"
+	"github.com/mostlygeek/llama-swap/internal/audit"
 	"github.com/mostlygeek/llama-swap/internal/perf"
+	"github.com/mostlygeek/llama-swap/proxy/codex"
 )
 
 type Model struct {
@@ -45,7 +47,26 @@ func addApiHandlers(pm *ProxyManager) {
 			apiGroup.GET("/audit/usage/:user_id", pm.apiAuditUserUsage)
 			apiGroup.GET("/audit/captures", pm.apiAuditCaptures)
 		}
+		apiGroup.GET("/codex/accounts", pm.apiCodexAccounts)
+		if pm.auditStore != nil {
+			apiGroup.GET("/codex/usage", pm.apiCodexUsage)
+			apiGroup.GET("/codex/usage/:user_id", pm.apiCodexUserUsage)
+		}
 	}
+}
+
+type codexAccountInfo struct {
+	Name        string                              `json:"name"`
+	PlanType    string                              `json:"plan_type,omitempty"`
+	ActiveLimit string                              `json:"active_limit,omitempty"`
+	TokenValid  bool                                `json:"token_valid"`
+	ExpiresAt   int64                               `json:"token_expires_at"`
+	AccountID   string                              `json:"account_id,omitempty"`
+	Primary     codex.WindowSnapshot                `json:"primary"`
+	Secondary   codex.WindowSnapshot                `json:"secondary"`
+	Credits     codex.CreditsSnapshot               `json:"credits"`
+	Stats       *codex.AccountStatsSnapshot         `json:"stats,omitempty"`
+	ModelLimits map[string]codex.ModelLimitSnapshot `json:"model_limits,omitempty"`
 }
 
 func (pm *ProxyManager) apiUnloadAllModels(c *gin.Context) {
@@ -130,6 +151,7 @@ const (
 	msgTypeLogData     messageType = "logData"
 	msgTypeMetrics     messageType = "metrics"
 	msgTypeInFlight    messageType = "inflight"
+	msgTypeCodexQuota  messageType = "codexQuota"
 )
 
 type messageEnvelope struct {
@@ -201,6 +223,34 @@ func (pm *ProxyManager) apiSendEvents(c *gin.Context) {
 		}
 	}
 
+	sendCodexQuota := func() {
+		if pm.peerProxy == nil {
+			return
+		}
+		codexProxies := pm.peerProxy.GetCodexProxies()
+		if len(codexProxies) == 0 {
+			return
+		}
+		allQuotas := make(map[string]codex.QuotaSnapshot)
+		for _, proxy := range codexProxies {
+			if proxy == nil {
+				continue
+			}
+			for name, snapshot := range proxy.QuotaStats() {
+				allQuotas[name] = snapshot
+			}
+		}
+		data, err := json.Marshal(allQuotas)
+		if err == nil {
+			select {
+			case sendBuffer <- messageEnvelope{Type: msgTypeCodexQuota, Data: string(data)}:
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+	}
+
 	/**
 	 * Send updated models list
 	 */
@@ -234,6 +284,20 @@ func (pm *ProxyManager) apiSendEvents(c *gin.Context) {
 	defer event.On(func(e InFlightRequestsEvent) {
 		sendInFlight(e.Total)
 	})()
+
+	go func() {
+		sendCodexQuota()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sendCodexQuota()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// send initial batch of data
 	sendLogData("proxy", pm.proxyLogger.GetHistory())
@@ -405,6 +469,152 @@ func (pm *ProxyManager) apiGetCapture(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusNotFound, gin.H{"error": "capture not found"})
+}
+
+func (pm *ProxyManager) apiCodexAccounts(c *gin.Context) {
+	if pm.peerProxy == nil {
+		peerLog("[CODEX-API] accounts: peerProxy is nil\n")
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+
+	codexProxies := pm.peerProxy.GetCodexProxies()
+	if len(codexProxies) == 0 {
+		peerLog("[CODEX-API] accounts: GetCodexProxies returned %d proxies\n", len(codexProxies))
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+
+	accounts := collectCodexAccounts(codexProxies)
+	if len(accounts) == 0 {
+		peerLog("[CODEX-API] accounts: collectCodexAccounts returned 0 accounts (from %d proxies)\n", len(codexProxies))
+		for id, p := range codexProxies {
+			peerLog("[CODEX-API]   proxy %q: ListAccountStatuses=%d, QuotaStats=%d, Stats=%d\n",
+				id, len(p.ListAccountStatuses()), len(p.QuotaStats()), len(p.Stats()))
+		}
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	peerLog("[CODEX-API] accounts: returning %d accounts\n", len(accounts))
+	c.JSON(http.StatusOK, accounts)
+}
+
+func collectCodexAccounts(codexProxies map[string]*codex.Proxy) []codexAccountInfo {
+	accounts := make(map[string]*codexAccountInfo)
+	quotaCapturedAt := make(map[string]time.Time)
+	ensureAccount := func(name string) *codexAccountInfo {
+		account := accounts[name]
+		if account == nil {
+			account = &codexAccountInfo{Name: name}
+			accounts[name] = account
+		}
+		return account
+	}
+
+	for _, proxy := range codexProxies {
+		if proxy == nil {
+			continue
+		}
+
+		for _, status := range proxy.ListAccountStatuses() {
+			if status.Name == "" {
+				continue
+			}
+			account := ensureAccount(status.Name)
+			account.TokenValid = account.TokenValid || status.TokenValid
+			if status.ExpiresAt > account.ExpiresAt {
+				account.ExpiresAt = status.ExpiresAt
+			}
+			if account.AccountID == "" {
+				account.AccountID = status.AccountID
+			}
+		}
+
+		for name, quota := range proxy.QuotaStats() {
+			if name == "" {
+				continue
+			}
+			if capturedAt, ok := quotaCapturedAt[name]; ok && !quota.CapturedAt.After(capturedAt) {
+				continue
+			}
+			account := ensureAccount(name)
+			account.PlanType = quota.PlanType
+			account.ActiveLimit = quota.ActiveLimit
+			account.Primary = quota.Primary
+			account.Secondary = quota.Secondary
+			account.Credits = quota.Credits
+			account.ModelLimits = quota.ModelLimits
+			quotaCapturedAt[name] = quota.CapturedAt
+		}
+
+		for _, stats := range proxy.Stats() {
+			if stats.Name == "" {
+				continue
+			}
+			account := ensureAccount(stats.Name)
+			if account.Stats == nil {
+				statsCopy := stats
+				account.Stats = &statsCopy
+				continue
+			}
+			account.Stats.TotalReqs += stats.TotalReqs
+			account.Stats.CacheHits += stats.CacheHits
+			if account.Stats.TotalReqs > 0 {
+				account.Stats.CacheHitRate = float64(account.Stats.CacheHits) / float64(account.Stats.TotalReqs)
+			}
+		}
+	}
+
+	names := make([]string, 0, len(accounts))
+	for name := range accounts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	result := make([]codexAccountInfo, 0, len(names))
+	for _, name := range names {
+		result = append(result, *accounts[name])
+	}
+	return result
+}
+
+func (pm *ProxyManager) apiCodexUsage(c *gin.Context) {
+	if pm.auditStore == nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	period := c.DefaultQuery("period", "7d")
+	entries, err := pm.auditStore.GetCodexUsage(period)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if entries == nil {
+		entries = []audit.CodexUsageEntry{}
+	}
+	c.JSON(http.StatusOK, entries)
+}
+
+func (pm *ProxyManager) apiCodexUserUsage(c *gin.Context) {
+	if pm.auditStore == nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	userID, err := strconv.ParseInt(c.Param("user_id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+	period := c.DefaultQuery("period", "7d")
+	entries, err := pm.auditStore.GetCodexUserUsage(userID, period)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if entries == nil {
+		entries = []audit.CodexUserUsageEntry{}
+	}
+	c.JSON(http.StatusOK, entries)
 }
 
 func inferCaptureContentTypes(capture *ReqRespCapture) {
