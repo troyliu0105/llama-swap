@@ -75,6 +75,16 @@
       Activity
     </a>
     <a
+      href="/codex"
+      use:link
+      class="text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-gray-100 p-1 whitespace-nowrap"
+      class:font-semibold={isActive("/codex", $currentRoute)}
+      class:underline={isActive("/codex", $currentRoute)}
+      class:underline-offset-4={isActive("/codex", $currentRoute)}
+    >
+      Codex
+    </a>
+    <a
       href="/audit"
       use:link
       class="text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-gray-100 p-1 whitespace-nowrap"

@@ -19,6 +19,7 @@ export const proxyLogs = writable<string>("");
 export const upstreamLogs = writable<string>("");
 export const metrics = writable<ActivityLogEntry[]>([]);
 export const inFlightRequests = writable<number>(0);
+export const codexAccounts = writable<CodexAccount[]>([]);
 export const versionInfo = writable<VersionInfo>({
   build_date: "unknown",
   commit: "unknown",
@@ -98,6 +99,14 @@ export function enableAPIEvents(enabled: boolean): void {
           case "inflight": {
             const stats = JSON.parse(message.data) as InFlightStats;
             inFlightRequests.set(stats.total ?? 0);
+            break;
+          }
+          case "codexQuota": {
+            fetchCodexAccounts().then((accounts) => {
+              if (accounts.length > 0) {
+                codexAccounts.set(accounts);
+              }
+            });
             break;
           }
         }
@@ -240,6 +249,70 @@ export interface AuditCaptureInfo {
   created_at: string;
 }
 
+export interface CodexWindowSnapshot {
+  used_percent: number;
+  reset_after_seconds: number;
+  reset_at: number;
+  window_minutes: number;
+}
+
+export interface CodexCreditsSnapshot {
+  balance: string;
+  has_credits: boolean;
+  unlimited: boolean;
+}
+
+export interface CodexModelLimitSnapshot {
+  limit_name: string;
+  primary_over_secondary_limit_percent: number;
+  primary_used_percent: number;
+  primary_reset_after_seconds: number;
+  primary_reset_at: number;
+  primary_window_minutes: number;
+  secondary_used_percent: number;
+  secondary_reset_after_seconds: number;
+  secondary_reset_at: number;
+  secondary_window_minutes: number;
+}
+
+export interface CodexAccount {
+  name: string;
+  plan_type: string;
+  active_limit: string;
+  token_valid: boolean;
+  token_expires_at: number;
+  account_id: string;
+  primary: CodexWindowSnapshot;
+  secondary: CodexWindowSnapshot;
+  credits: CodexCreditsSnapshot;
+  stats: {
+    name: string;
+    totalRequests: number;
+    cacheHits: number;
+    cacheHitRate: number;
+  } | null;
+  model_limits: Record<string, CodexModelLimitSnapshot>;
+}
+
+export interface CodexUsageEntry {
+  user_id: number;
+  name: string;
+  codex_account: string;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  request_count: number;
+}
+
+export interface CodexUserUsageEntry {
+  codex_account: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  request_count: number;
+}
+
 export async function fetchAuditUsers(): Promise<AuditUser[]> {
   try {
     const response = await fetch("/api/audit/users");
@@ -295,5 +368,38 @@ export async function fetchPerformance(after?: string): Promise<PerformanceRespo
   } catch (error) {
     console.error("Failed to fetch performance data:", error);
     return null;
+  }
+}
+
+export async function fetchCodexAccounts(): Promise<CodexAccount[]> {
+  try {
+    const response = await fetch("/api/codex/accounts");
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Failed to fetch codex accounts:", error);
+    return [];
+  }
+}
+
+export async function fetchCodexUsage(period: string = "7d"): Promise<CodexUsageEntry[]> {
+  try {
+    const response = await fetch(`/api/codex/usage?period=${period}`);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Failed to fetch codex usage:", error);
+    return [];
+  }
+}
+
+export async function fetchCodexUserUsage(userId: number, period: string = "7d"): Promise<CodexUserUsageEntry[]> {
+  try {
+    const response = await fetch(`/api/codex/usage/${userId}?period=${period}`);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Failed to fetch codex user usage:", error);
+    return [];
   }
 }

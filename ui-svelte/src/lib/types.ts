@@ -91,7 +91,7 @@ export interface PerformanceResponse {
 }
 
 export interface APIEventEnvelope {
-  type: "modelStatus" | "logData" | "metrics" | "inflight" | "perfsys" | "perfgpu";
+  type: "modelStatus" | "logData" | "metrics" | "inflight" | "perfsys" | "perfgpu" | "codexQuota";
   data: string;
 }
 

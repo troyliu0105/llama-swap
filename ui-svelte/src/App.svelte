@@ -6,6 +6,7 @@
   import Models from "./routes/Models.svelte";
   import Activity from "./routes/Activity.svelte";
   import Audit from "./routes/Audit.svelte";
+  import Codex from "./routes/Codex.svelte";
   import Performance from "./routes/Performance.svelte";
   import Playground from "./routes/Playground.svelte";
   import PlaygroundStub from "./routes/PlaygroundStub.svelte";
@@ -19,6 +20,7 @@
     "/logs": LogViewer,
     "/activity": Activity,
     "/audit": Audit,
+    "/codex": Codex,
     "/performance": Performance,
     "*": PlaygroundStub,
   };
