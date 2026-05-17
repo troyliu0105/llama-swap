@@ -84,13 +84,13 @@ func (p *Proxy) PrepareRequest(model string, req *http.Request) (string, error) 
 	p.injectHeaders(req, token)
 	p.stripProxyHeaders(req)
 
-	p.logger("[CODEX] ▶ %s | %s | %s\n", account, model, req.URL.Path)
+	p.logger("[CODEX] ▶ %s | %s | %s", account, model, req.URL.Path)
 	return account, nil
 }
 
 func (p *Proxy) rewriteURL(req *http.Request) {
 	path := req.URL.Path
-	if path == "/v1/responses" || path == "/v1/chat/completions" {
+	if path == "/v1/responses" || path == "/responses" || path == "/v1/chat/completions" || path == "/chat/completions" {
 		req.URL.Scheme = "https"
 		req.URL.Host = "chatgpt.com"
 		req.URL.Path = "/backend-api/codex/responses"
@@ -129,7 +129,7 @@ func (p *Proxy) RecordResponse(model, account string, statusCode int, responseBo
 	}
 
 	size := len(responseBody)
-	p.logger("[CODEX] ◀ %s | %s | %d | %s | cache=%v\n", account, model, statusCode, humanSize(size), cacheHit)
+	p.logger("[CODEX] ◀ %s | %s | %d | %s | cache=%v", account, model, statusCode, humanSize(size), cacheHit)
 }
 
 func (p *Proxy) RecordStreamingResponse(model, account string, statusCode int) {
@@ -139,12 +139,12 @@ func (p *Proxy) RecordStreamingResponse(model, account string, statusCode int) {
 	} else {
 		p.balancer.RecordSuccess(model, account)
 	}
-	p.logger("[CODEX] ◀ %s | %s | %d SSE | %s\n", account, model, statusCode, p.peerID)
+	p.logger("[CODEX] ◀ %s | %s | %d SSE | %s", account, model, statusCode, p.peerID)
 }
 
 func (p *Proxy) RecordError(model, account string) {
 	p.balancer.RecordFailure(model, account)
-	p.logger("[CODEX] ✗ %s | %s | connection_error\n", account, model)
+	p.logger("[CODEX] ✗ %s | %s | connection_error", account, model)
 }
 
 func (p *Proxy) GetTransport() *http.Transport {

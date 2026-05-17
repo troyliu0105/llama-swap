@@ -38,18 +38,23 @@ func newTestProxy(t *testing.T, accountNames []string) *Proxy {
 func TestProxy_PrepareRequest_URLRewrite(t *testing.T) {
 	p := newTestProxy(t, []string{"acct1"})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	account, err := p.PrepareRequest("model-a", req)
-	require.NoError(t, err)
-	assert.Equal(t, "acct1", account)
-	assert.Equal(t, "https", req.URL.Scheme)
-	assert.Equal(t, "chatgpt.com", req.URL.Host)
-	assert.Equal(t, "/backend-api/codex/responses", req.URL.Path)
-
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	_, err = p.PrepareRequest("model-b", req2)
-	require.NoError(t, err)
-	assert.Equal(t, "/backend-api/codex/responses", req2.URL.Path)
+	paths := []string{
+		"/v1/chat/completions",
+		"/chat/completions",
+		"/v1/responses",
+		"/responses",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			account, err := p.PrepareRequest("model-a", req)
+			require.NoError(t, err)
+			assert.Equal(t, "acct1", account)
+			assert.Equal(t, "https", req.URL.Scheme)
+			assert.Equal(t, "chatgpt.com", req.URL.Host)
+			assert.Equal(t, "/backend-api/codex/responses", req.URL.Path)
+		})
+	}
 }
 
 func TestProxy_PrepareRequest_Headers(t *testing.T) {
