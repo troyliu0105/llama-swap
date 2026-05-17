@@ -46,6 +46,7 @@ func addApiHandlers(pm *ProxyManager) {
 			apiGroup.GET("/audit/usage", pm.apiAuditUsage)
 			apiGroup.GET("/audit/usage/:user_id", pm.apiAuditUserUsage)
 			apiGroup.GET("/audit/captures", pm.apiAuditCaptures)
+			apiGroup.GET("/audit/activity", pm.apiAuditActivity)
 		}
 		apiGroup.GET("/codex/accounts", pm.apiCodexAccounts)
 		if pm.auditStore != nil {
@@ -672,6 +673,22 @@ func (pm *ProxyManager) apiAuditUsers(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, users)
+}
+
+func (pm *ProxyManager) apiAuditActivity(c *gin.Context) {
+	limit := 200
+	if l, err := strconv.Atoi(c.DefaultQuery("limit", "200")); err == nil && l > 0 && l <= 1000 {
+		limit = l
+	}
+	entries, err := pm.auditStore.GetRecentActivity(limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get activity"})
+		return
+	}
+	if entries == nil {
+		entries = []audit.ActivityEntry{}
+	}
+	c.JSON(http.StatusOK, entries)
 }
 
 func (pm *ProxyManager) apiAuditUsage(c *gin.Context) {

@@ -359,3 +359,58 @@ func (s *AuditStore) LoadCodexQuotaSnapshots() ([]CodexQuotaSnapshotRow, error) 
 	}
 	return result, nil
 }
+
+type ActivityEntry struct {
+	ID              int    `json:"id"`
+	Timestamp       string `json:"timestamp"`
+	Model           string `json:"model"`
+	ReqPath         string `json:"req_path"`
+	RespContentType string `json:"resp_content_type"`
+	RespStatusCode  int    `json:"resp_status_code"`
+	DurationMs      int    `json:"duration_ms"`
+	HasCapture      bool   `json:"has_capture"`
+	Tokens          struct {
+		CachedTokens    int     `json:"cache_tokens"`
+		InputTokens     int     `json:"input_tokens"`
+		OutputTokens    int     `json:"output_tokens"`
+		PromptPerSecond float64 `json:"prompt_per_second"`
+		TokensPerSecond float64 `json:"tokens_per_second"`
+	} `json:"tokens"`
+}
+
+func (s *AuditStore) GetRecentActivity(limit int) ([]ActivityEntry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+		SELECT rl.metric_id, rl.created_at, rl.model, rl.req_path, rl.status_code,
+			rl.input_tokens, rl.output_tokens,
+			CASE WHEN rl.cached_tokens > 0 THEN rl.cached_tokens ELSE 0 END,
+			rl.duration_ms,
+			CASE WHEN rl.tokens_per_second >= 0 THEN rl.tokens_per_second ELSE -1 END,
+			CASE WHEN rl.prompt_per_second >= 0 THEN rl.prompt_per_second ELSE -1 END,
+			EXISTS(SELECT 1 FROM captures c WHERE c.request_log_id = rl.id)
+		FROM request_log rl
+		ORDER BY rl.id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get recent activity: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]ActivityEntry, 0, limit)
+	for rows.Next() {
+		var e ActivityEntry
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Model, &e.ReqPath, &e.RespStatusCode,
+			&e.Tokens.InputTokens, &e.Tokens.OutputTokens, &e.Tokens.CachedTokens,
+			&e.DurationMs, &e.Tokens.TokensPerSecond, &e.Tokens.PromptPerSecond, &e.HasCapture); err != nil {
+			return nil, fmt.Errorf("scan activity entry: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate activity entries: %w", err)
+	}
+	return entries, nil
+}

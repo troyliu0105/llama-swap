@@ -62,6 +62,12 @@ export function enableAPIEvents(enabled: boolean): void {
       models.set([]);
       retryCount = 0;
       connectionState.set("connected");
+
+      fetchActivityHistory().then((history) => {
+        if (history.length > 0) {
+          metrics.set(history);
+        }
+      });
     };
 
     apiEventSource.onmessage = (e: MessageEvent) => {
@@ -400,6 +406,17 @@ export async function fetchCodexUserUsage(userId: number, period: string = "7d")
     return await response.json();
   } catch (error) {
     console.error("Failed to fetch codex user usage:", error);
+    return [];
+  }
+}
+
+export async function fetchActivityHistory(): Promise<ActivityLogEntry[]> {
+  try {
+    const response = await fetch("/api/audit/activity?limit=200");
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Failed to fetch activity history:", error);
     return [];
   }
 }
