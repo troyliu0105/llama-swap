@@ -17,11 +17,12 @@ const (
 )
 
 type Proxy struct {
-	peerID    string
-	auth      *AuthStore
-	balancer  *Balancer
-	transport *http.Transport
-	logger    func(format string, args ...any)
+	peerID     string
+	auth       *AuthStore
+	balancer   *Balancer
+	transport  *http.Transport
+	logger     func(format string, args ...any)
+	quotaStore *QuotaStore
 
 	sessionCounter atomic.Uint64
 }
@@ -61,11 +62,12 @@ func NewProxy(
 	}
 
 	return &Proxy{
-		peerID:    peerID,
-		auth:      auth,
-		balancer:  balancer,
-		transport: transport,
-		logger:    logger,
+		peerID:     peerID,
+		auth:       auth,
+		balancer:   balancer,
+		transport:  transport,
+		logger:     logger,
+		quotaStore: NewQuotaStore(),
 	}, nil
 }
 
@@ -119,7 +121,7 @@ func (p *Proxy) stripProxyHeaders(req *http.Request) {
 	req.Header.Del("Via")
 }
 
-func (p *Proxy) RecordResponse(model, account string, statusCode int, responseBody []byte) {
+func (p *Proxy) RecordResponse(model, account string, statusCode int, responseBody []byte, headers http.Header) {
 	cacheHit := detectCacheHit(responseBody)
 	p.balancer.RecordResult(account, cacheHit)
 	if isFailureStatus(statusCode) {
@@ -130,9 +132,10 @@ func (p *Proxy) RecordResponse(model, account string, statusCode int, responseBo
 
 	size := len(responseBody)
 	p.logger("[CODEX] ◀ %s | %s | %d | %s | cache=%v", account, model, statusCode, humanSize(size), cacheHit)
+	p.recordQuotaHeaders(account, headers)
 }
 
-func (p *Proxy) RecordStreamingResponse(model, account string, statusCode int) {
+func (p *Proxy) RecordStreamingResponse(model, account string, statusCode int, headers http.Header) {
 	p.balancer.RecordRequestOnly(account)
 	if isFailureStatus(statusCode) {
 		p.balancer.RecordFailure(model, account)
@@ -140,6 +143,7 @@ func (p *Proxy) RecordStreamingResponse(model, account string, statusCode int) {
 		p.balancer.RecordSuccess(model, account)
 	}
 	p.logger("[CODEX] ◀ %s | %s | %d SSE | %s", account, model, statusCode, p.peerID)
+	p.recordQuotaHeaders(account, headers)
 }
 
 func (p *Proxy) RecordError(model, account string) {
@@ -153,6 +157,55 @@ func (p *Proxy) GetTransport() *http.Transport {
 
 func (p *Proxy) Stats() []AccountStatsSnapshot {
 	return p.balancer.Stats()
+}
+
+func (p *Proxy) QuotaStats() map[string]QuotaSnapshot {
+	if p.quotaStore == nil {
+		return map[string]QuotaSnapshot{}
+	}
+	return p.quotaStore.List()
+}
+
+// AccountTokenStatus returns token validity info for an account.
+type AccountTokenStatus struct {
+	Name       string `json:"name"`
+	TokenValid bool   `json:"token_valid"`
+	ExpiresAt  int64  `json:"token_expires_at"`
+	AccountID  string `json:"account_id,omitempty"`
+}
+
+// ListAccountStatuses returns token validity for all known accounts.
+func (p *Proxy) ListAccountStatuses() []AccountTokenStatus {
+	names := p.auth.ListAccounts()
+	statuses := make([]AccountTokenStatus, 0, len(names))
+	now := time.Now().Unix()
+	for _, name := range names {
+		status := AccountTokenStatus{Name: name}
+		if token, err := p.auth.GetToken(name); err == nil && token != nil {
+			status.ExpiresAt = token.ExpiresAt
+			status.AccountID = token.AccountID
+			status.TokenValid = now < token.ExpiresAt
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses
+}
+
+// ListAccounts returns all known account names.
+func (p *Proxy) ListAccounts() []string {
+	return p.auth.ListAccounts()
+}
+
+func (p *Proxy) recordQuotaHeaders(account string, headers http.Header) {
+	if headers == nil || account == "" || p.quotaStore == nil {
+		return
+	}
+
+	snapshot := ParseQuotaHeaders(headers)
+	if modelLimits := ParseBengalfoxHeaders(headers); len(modelLimits) > 0 {
+		snapshot.ModelLimits = modelLimits
+	}
+	p.quotaStore.Update(account, snapshot)
 }
 
 func (p *Proxy) generateSessionID() string {

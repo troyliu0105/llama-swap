@@ -28,10 +28,11 @@ func newTestProxy(t *testing.T, accountNames []string) *Proxy {
 	}
 
 	return &Proxy{
-		peerID:   "test-peer",
-		auth:     store,
-		balancer: NewBalancer(accountNames, "round-robin"),
-		logger:   func(format string, args ...any) {},
+		peerID:     "test-peer",
+		auth:       store,
+		balancer:   NewBalancer(accountNames, "round-robin"),
+		logger:     func(format string, args ...any) {},
+		quotaStore: NewQuotaStore(),
 	}
 }
 
@@ -92,10 +93,11 @@ func TestProxy_PrepareRequest_AccountIDEmpty(t *testing.T) {
 	}))
 
 	p := &Proxy{
-		peerID:   "test-peer",
-		auth:     store,
-		balancer: NewBalancer([]string{"noacct"}, "round-robin"),
-		logger:   func(format string, args ...any) {},
+		peerID:     "test-peer",
+		auth:       store,
+		balancer:   NewBalancer([]string{"noacct"}, "round-robin"),
+		logger:     func(format string, args ...any) {},
+		quotaStore: NewQuotaStore(),
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
@@ -172,14 +174,14 @@ func TestProxy_RecordResponse_RecordsSuccessAndFailure(t *testing.T) {
 	account, err := p.balancer.Select("model-a")
 	require.NoError(t, err)
 
-	p.RecordResponse("model-a", account, http.StatusOK, []byte(`{"usage":{"prompt_tokens_details":{"cached_tokens":1}}}`))
+	p.RecordResponse("model-a", account, http.StatusOK, []byte(`{"usage":{"prompt_tokens_details":{"cached_tokens":1}}}`), nil)
 	stats := p.Stats()
 	require.Len(t, stats, 2)
 	assert.Equal(t, int64(1), stats[0].TotalReqs)
 	assert.Equal(t, int64(1), stats[0].CacheHits)
 
 	for i := 0; i < p.balancer.maxFails; i++ {
-		p.RecordResponse("model-a", account, http.StatusInternalServerError, nil)
+		p.RecordResponse("model-a", account, http.StatusInternalServerError, nil, nil)
 	}
 
 	selected, err := p.balancer.Select("model-a")
@@ -194,7 +196,7 @@ func TestProxy_RecordStreamingResponseAndError_RecordFailures(t *testing.T) {
 	account, err := p.balancer.Select("model-a")
 	require.NoError(t, err)
 
-	p.RecordStreamingResponse("model-a", account, http.StatusOK)
+	p.RecordStreamingResponse("model-a", account, http.StatusOK, nil)
 	stats := p.Stats()
 	require.Len(t, stats, 2)
 	assert.Equal(t, int64(1), stats[0].TotalReqs)
@@ -206,6 +208,47 @@ func TestProxy_RecordStreamingResponseAndError_RecordFailures(t *testing.T) {
 	selected, err := p.balancer.Select("model-a")
 	require.NoError(t, err)
 	assert.NotEqual(t, account, selected)
+}
+
+func TestProxy_RecordResponse_CapturesQuotaStats(t *testing.T) {
+	p := newTestProxy(t, []string{"acct1"})
+	headers := http.Header{
+		"X-Codex-Plan-Type":                                      {"pro"},
+		"X-Codex-Active-Limit":                                   {"primary"},
+		"X-Codex-Primary-Used-Percent":                           {"42"},
+		"X-Codex-Credits-Has-Credits":                            {"True"},
+		"X-Codex-Bengalfox-Limit-Name":                           {"gpt-5"},
+		"X-Codex-Bengalfox-Primary-Over-Secondary-Limit-Percent": {"75"},
+	}
+
+	p.RecordResponse("model-a", "acct1", http.StatusOK, nil, headers)
+
+	stats := p.QuotaStats()
+	snapshot, ok := stats["acct1"]
+	require.True(t, ok)
+	assert.Equal(t, "pro", snapshot.PlanType)
+	assert.Equal(t, "primary", snapshot.ActiveLimit)
+	assert.Equal(t, 42, snapshot.Primary.UsedPercent)
+	assert.True(t, snapshot.Credits.HasCredits)
+	require.Contains(t, snapshot.ModelLimits, "gpt-5")
+	assert.Equal(t, 75, snapshot.ModelLimits["gpt-5"].PrimaryOverSecondaryLimitPct)
+}
+
+func TestProxy_RecordStreamingResponse_CapturesQuotaStats(t *testing.T) {
+	p := newTestProxy(t, []string{"acct1"})
+	headers := http.Header{
+		"X-Codex-Plan-Type":              {"team"},
+		"X-Codex-Secondary-Used-Percent": {"33"},
+		"X-Codex-Credits-Unlimited":      {"True"},
+	}
+
+	p.RecordStreamingResponse("model-a", "acct1", http.StatusOK, headers)
+
+	snapshot, ok := p.quotaStore.Get("acct1")
+	require.True(t, ok)
+	assert.Equal(t, "team", snapshot.PlanType)
+	assert.Equal(t, 33, snapshot.Secondary.UsedPercent)
+	assert.True(t, snapshot.Credits.Unlimited)
 }
 
 func TestProxy_IsFailureStatus(t *testing.T) {
@@ -241,7 +284,7 @@ func TestProxy_RecordResponse_AuthFailuresCauseFailover(t *testing.T) {
 			require.NoError(t, err)
 
 			for i := 0; i < p.balancer.maxFails; i++ {
-				p.RecordResponse("model-a", account, statusCode, nil)
+				p.RecordResponse("model-a", account, statusCode, nil, nil)
 			}
 
 			selected, err := p.balancer.Select("model-a")
@@ -261,7 +304,7 @@ func TestProxy_RecordStreamingResponse_AuthFailuresCauseFailover(t *testing.T) {
 			require.NoError(t, err)
 
 			for i := 0; i < p.balancer.maxFails; i++ {
-				p.RecordStreamingResponse("model-a", account, statusCode)
+				p.RecordStreamingResponse("model-a", account, statusCode, nil)
 			}
 
 			selected, err := p.balancer.Select("model-a")
