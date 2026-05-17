@@ -498,7 +498,10 @@ func (mp *metricsMonitor) recordAudit(request *http.Request, apiKey, reqPath str
 		userName = cfg.Name
 	}
 
-	codexAccount, _ := request.Context().Value(codexAccountKey{}).(string)
+	codexAccount := ""
+	if h, _ := request.Context().Value(codexAccountHolderKey{}).(*codexAccountHolder); h != nil {
+		codexAccount = h.Value
+	}
 
 	mp.auditStore.RecordRequest(
 		tm.ID, apiKey, userName, tm.Model, tm.ReqPath, tm.RespStatusCode,

@@ -25,6 +25,12 @@ type peerCtxKey struct{}
 
 type codexAccountKey struct{}
 
+type codexAccountHolderKey struct{}
+
+type codexAccountHolder struct {
+	Value string
+}
+
 func peerLog(format string, args ...any) {
 	ts := time.Now().Format("15:04:05.000")
 	fmt.Printf("[%s] "+format, append([]any{ts}, args...)...)
@@ -493,6 +499,9 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 		}
 		ctx := context.WithValue(request.Context(), codexAccountKey{}, account)
 		request = request.WithContext(ctx)
+		if h, _ := request.Context().Value(codexAccountHolderKey{}).(*codexAccountHolder); h != nil {
+			h.Value = account
+		}
 	} else {
 		if pp.apiKey != "" {
 			request.Header.Set("Authorization", "Bearer "+pp.apiKey)

@@ -523,7 +523,7 @@ func TestMetricsMonitor_RecordAudit_CodexAccountFromContext(t *testing.T) {
 	mm := newMetricsMonitor(testLogger, 10, 0, nil)
 	mm.SetAuditStore(store)
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	req = req.WithContext(context.WithValue(req.Context(), codexAccountKey{}, "codex-account-a"))
+	req = req.WithContext(context.WithValue(req.Context(), codexAccountHolderKey{}, &codexAccountHolder{Value: "codex-account-a"}))
 
 	mm.recordAudit(req, "api-key", "/v1/chat/completions", nil, ActivityLogEntry{
 		ID:             42,

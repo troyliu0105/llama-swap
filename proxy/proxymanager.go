@@ -224,6 +224,7 @@ func New(proxyConfig config.Config) *ProxyManager {
 			pm.auditStore = auditStore
 			pm.metricsMonitor.SetAuditStore(auditStore)
 			pm.metricsMonitor.SetAPIKeys(proxyConfig.APIKeys)
+			pm.wireCodexQuotaPersistence(auditStore)
 		}
 	}
 
@@ -952,6 +953,7 @@ func (pm *ProxyManager) mkProxyJSONHandler(cf captureFields) func(*gin.Context) 
 		isStreaming := gjson.GetBytes(bodyBytes, "stream").Bool()
 		ctx := context.WithValue(c.Request.Context(), proxyCtxKey("streaming"), isStreaming)
 		ctx = context.WithValue(ctx, proxyCtxKey("model"), modelID)
+		ctx = context.WithValue(ctx, codexAccountHolderKey{}, &codexAccountHolder{})
 		c.Request = c.Request.WithContext(ctx)
 
 		if pm.metricsMonitor != nil && c.Request.Method == "POST" {
