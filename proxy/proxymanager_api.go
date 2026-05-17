@@ -474,29 +474,17 @@ func (pm *ProxyManager) apiGetCapture(c *gin.Context) {
 
 func (pm *ProxyManager) apiCodexAccounts(c *gin.Context) {
 	if pm.peerProxy == nil {
-		peerLog("[CODEX-API] accounts: peerProxy is nil\n")
 		c.JSON(http.StatusOK, []interface{}{})
 		return
 	}
 
 	codexProxies := pm.peerProxy.GetCodexProxies()
 	if len(codexProxies) == 0 {
-		peerLog("[CODEX-API] accounts: GetCodexProxies returned %d proxies\n", len(codexProxies))
 		c.JSON(http.StatusOK, []interface{}{})
 		return
 	}
 
 	accounts := collectCodexAccounts(codexProxies)
-	if len(accounts) == 0 {
-		peerLog("[CODEX-API] accounts: collectCodexAccounts returned 0 accounts (from %d proxies)\n", len(codexProxies))
-		for id, p := range codexProxies {
-			peerLog("[CODEX-API]   proxy %q: ListAccountStatuses=%d, QuotaStats=%d, Stats=%d\n",
-				id, len(p.ListAccountStatuses()), len(p.QuotaStats()), len(p.Stats()))
-		}
-		c.JSON(http.StatusOK, []interface{}{})
-		return
-	}
-	peerLog("[CODEX-API] accounts: returning %d accounts\n", len(accounts))
 	c.JSON(http.StatusOK, accounts)
 }
 
