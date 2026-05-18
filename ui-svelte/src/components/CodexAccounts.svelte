@@ -130,7 +130,7 @@
           </div>
           <div>
             <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Cache Rate</dt>
-            <dd>{account.stats ? `${account.stats.cacheHitRate.toFixed(1)}%` : "-"}</dd>
+            <dd>{account.stats ? `${(account.stats.cacheHitRate * 100).toFixed(1)}%` : "-"}</dd>
           </div>
         </dl>
 
