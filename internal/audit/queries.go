@@ -167,8 +167,8 @@ func (s *AuditStore) GetCodexAccountStats(period string) ([]CodexAccountStatsEnt
 	rows, err := s.db.Query(`
 		SELECT codex_account,
 			COUNT(*),
-			COALESCE(SUM(CASE WHEN cached_tokens >= 0 THEN cached_tokens ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN cached_tokens >= 0 THEN input_tokens ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN cached_tokens ELSE 0 END), 0),
+			COALESCE(SUM(input_tokens), 0)
 		FROM request_log
 		WHERE codex_account IS NOT NULL AND created_at >= ?
 		GROUP BY codex_account

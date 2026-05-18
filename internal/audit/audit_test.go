@@ -546,7 +546,7 @@ func TestAuditStore_GetCodexAccountStats_ExcludesNoCacheRows(t *testing.T) {
 
 	// Request with cache data: input=100, cached=80 → included in both
 	recordCodexRequest(store, "key1", "User1", "gpt-5", "acct", 100, 10, 80)
-	// Request without cache data (cached_tokens=-1): input=50 → excluded from rate calc
+	// Request without cache data (cached_tokens=-1): input=50 → excluded from cache total, included in input total
 	recordCodexRequest(store, "key1", "User1", "gpt-5", "acct", 50, 5, -1)
 	eventuallyCount(t, store.db, `SELECT COUNT(*) FROM request_log`, 2)
 
@@ -557,8 +557,8 @@ func TestAuditStore_GetCodexAccountStats_ExcludesNoCacheRows(t *testing.T) {
 	a := entries[0]
 	assert.Equal(t, int64(2), a.TotalRequests)
 	assert.Equal(t, int64(80), a.CachedTokens)
-	assert.Equal(t, int64(100), a.InputTokens)
-	assert.InDelta(t, 0.8, a.CacheHitRate, 0.001)
+	assert.Equal(t, int64(150), a.InputTokens)
+	assert.InDelta(t, 80.0/150.0, a.CacheHitRate, 0.001)
 }
 
 func TestAuditStore_GetCodexUsage_NoData(t *testing.T) {
