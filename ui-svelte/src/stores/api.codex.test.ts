@@ -45,7 +45,7 @@ describe("codexQuota SSE event", () => {
     vi.stubGlobal("EventSource", MockEventSource);
 
     mockFetch = vi.fn((url: string) => {
-      if (url === "/api/codex/accounts") {
+      if (url.startsWith("/api/codex/accounts")) {
         return Promise.resolve({
           ok: true,
           status: 200,
@@ -98,7 +98,7 @@ describe("codexQuota SSE event", () => {
 
     es.simulateMessage("codexQuota", {});
 
-    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledWith("/api/codex/accounts"));
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledWith("/api/codex/accounts?period=7d"));
   });
 
   it("does not fetch codex accounts when on / route", async () => {

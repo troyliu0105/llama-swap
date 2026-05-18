@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { CodexAccount, CodexModelLimitSnapshot, CodexWindowSnapshot } from "../stores/api";
+  import { formatResetSeconds, formatCacheRate, labelForWindow as labelForWindowFn } from "../lib/codexFormat";
 
   interface Props {
     accounts: CodexAccount[];
@@ -13,19 +14,11 @@
     return n.toLocaleString();
   }
 
-  function formatResetTime(seconds: number): string {
-    if (seconds <= 0) return "now";
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    if (h > 0) return `${h}h ${m}m`;
-    return `${m}m`;
-  }
-
   function formatExpiry(expiresAt: number): string {
     const now = Math.floor(Date.now() / 1000);
     const diff = expiresAt - now;
     if (diff <= 0) return "expired";
-    return formatResetTime(diff);
+    return formatResetSeconds(diff);
   }
 
   function progressBarColor(pct: number): string {
@@ -43,7 +36,7 @@
   }
 
   function labelForWindow(window: CodexWindowSnapshot): string {
-    return `${window.used_percent.toFixed(1)}% used, resets in ${formatResetTime(window.reset_after_seconds)}`;
+    return labelForWindowFn(window);
   }
 </script>
 
@@ -130,7 +123,7 @@
           </div>
           <div>
             <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Cache Rate</dt>
-            <dd>{account.stats ? `${(account.stats.cacheHitRate * 100).toFixed(1)}%` : "-"}</dd>
+            <dd>{account.stats ? formatCacheRate(account.stats.cacheHitRate) : "-"}</dd>
           </div>
         </dl>
 
