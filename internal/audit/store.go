@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,11 +65,15 @@ func NewAuditStore(dbPath string, retentionDays int, captureFlushSize int, captu
 		store.captureFlushInterval = defaultCaptureFlushInterval
 	}
 
+	if logger != nil {
+		logger.Infof("audit db: opened %s", dbPath)
+	}
+
 	if err := store.configureDB(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := runMigrations(dbPath); err != nil {
+	if err := runMigrations(dbPath, store.logger); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -144,10 +149,14 @@ func (s *AuditStore) configureDB() error {
 		}
 	}
 
+	if s.logger != nil {
+		s.logger.Infof("audit db: configured PRAGMAs: %s", strings.Join(pragmas, ", "))
+	}
+
 	return nil
 }
 
-func runMigrations(dbPath string) error {
+func runMigrations(dbPath string, logger *logmon.Monitor) error {
 	sourceDriver, err := iofs.New(migrationFiles, "migrations")
 	if err != nil {
 		return fmt.Errorf("create audit migration source: %w", err)
@@ -159,15 +168,25 @@ func runMigrations(dbPath string) error {
 	}
 
 	err = migrator.Up()
-	sourceErr, databaseErr := migrator.Close()
-	if sourceErr != nil || databaseErr != nil {
-		return errors.Join(err, sourceErr, databaseErr)
-	}
+
 	if errors.Is(err, migrate.ErrNoChange) {
+		version, _, _ := migrator.Version()
+		_, _ = migrator.Close()
+		if logger != nil {
+			logger.Infof("audit db migrations: schema is up to date (version %d)", version)
+		}
 		return nil
 	}
+
 	if err != nil {
+		_, _ = migrator.Close()
 		return fmt.Errorf("run audit migrations: %w", err)
+	}
+
+	version, _, _ := migrator.Version()
+	_, _ = migrator.Close()
+	if logger != nil {
+		logger.Infof("audit db migrations: applied successfully (now at version %d)", version)
 	}
 
 	return nil
