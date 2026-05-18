@@ -90,9 +90,11 @@ func TestEnhancedPeerProxy_CustomHeaders(t *testing.T) {
 			Proxy:    testServer.URL,
 			ProxyURL: proxyURL,
 			Models:   []string{"test-model"},
-			Headers: map[string]string{
+			AddHeaders: map[string]string{
 				"X-Custom": "value",
-				"X-Remove": "",
+			},
+			RemoveHeaders: []string{
+				"X-Remove",
 			},
 		},
 	}

@@ -212,7 +212,7 @@ func TestPeerConfig_WithNewFields(t *testing.T) {
 proxy: http://192.168.1.23:8080
 models:
   - model_a
-headers:
+addHeaders:
   X-Custom-Header: custom-value
   X-Empty-Header: ""
 maxConcurrent: 5
@@ -226,14 +226,14 @@ timeout: 120s
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(config.Headers) != 2 {
-		t.Errorf("expected 2 headers, got %d", len(config.Headers))
+	if len(config.AddHeaders) != 2 {
+		t.Errorf("expected 2 addHeaders, got %d", len(config.AddHeaders))
 	}
-	if config.Headers["X-Custom-Header"] != "custom-value" {
-		t.Errorf("expected X-Custom-Header=custom-value, got %s", config.Headers["X-Custom-Header"])
+	if config.AddHeaders["X-Custom-Header"] != "custom-value" {
+		t.Errorf("expected X-Custom-Header=custom-value, got %s", config.AddHeaders["X-Custom-Header"])
 	}
-	if config.Headers["X-Empty-Header"] != "" {
-		t.Errorf("expected X-Empty-Header empty, got %s", config.Headers["X-Empty-Header"])
+	if config.AddHeaders["X-Empty-Header"] != "" {
+		t.Errorf("expected X-Empty-Header empty, got %s", config.AddHeaders["X-Empty-Header"])
 	}
 	if config.MaxConcurrent != 5 {
 		t.Errorf("expected MaxConcurrent=5, got %d", config.MaxConcurrent)
@@ -254,7 +254,7 @@ func TestPeerConfig_WithRemoveHeaders(t *testing.T) {
 proxy: http://192.168.1.23:8080
 models:
   - model_a
-headers:
+addHeaders:
   User-Agent: llama-swap/1.0
 removeHeaders:
   - X-Forwarded-For
@@ -289,8 +289,8 @@ models:
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(config.Headers) != 0 {
-		t.Errorf("expected empty headers, got %d", len(config.Headers))
+	if len(config.AddHeaders) != 0 {
+		t.Errorf("expected empty addHeaders, got %d", len(config.AddHeaders))
 	}
 	if config.MaxConcurrent != 0 {
 		t.Errorf("expected MaxConcurrent=0 (unlimited), got %d", config.MaxConcurrent)

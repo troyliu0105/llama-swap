@@ -102,7 +102,7 @@ type enhancedPeerMember struct {
 	peerID        string
 	reverseProxy  *httputil.ReverseProxy
 	apiKey        string
-	headers       map[string]string
+	addHeaders    map[string]string
 	removeHeaders []string
 	stripV1Prefix bool
 	maxConcurrent int
@@ -173,7 +173,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 		pp := &enhancedPeerMember{
 			peerID:          peerID,
 			apiKey:          peer.ApiKey,
-			headers:         peer.Headers,
+			addHeaders:      peer.AddHeaders,
 			removeHeaders:   peer.RemoveHeaders,
 			stripV1Prefix:   peer.StripV1Prefix,
 			maxConcurrent:   peer.MaxConcurrent,
@@ -517,10 +517,8 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 			request.Header.Set("x-api-key", pp.apiKey)
 		}
 
-		for key, value := range pp.headers {
-			if value == "" {
-				request.Header.Del(key)
-			} else {
+		for key, value := range pp.addHeaders {
+			if value != "" {
 				request.Header.Set(key, value)
 			}
 		}

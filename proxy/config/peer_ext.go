@@ -17,7 +17,7 @@ type ExtendedPeerConfig struct {
 	Filters  Filters  `yaml:"filters"`
 
 	// Extended fields
-	Headers          map[string]string `yaml:"headers"`
+	AddHeaders       map[string]string `yaml:"addHeaders"`
 	RemoveHeaders    []string          `yaml:"removeHeaders"`
 	MaxConcurrent    int               `yaml:"maxConcurrent"`
 	QueueSize        int               `yaml:"queueSize"`
@@ -42,7 +42,7 @@ func (c *ExtendedPeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) er
 		ApiKey:          "",
 		Models:          []string{},
 		Filters:         Filters{},
-		Headers:         map[string]string{},
+		AddHeaders:      map[string]string{},
 		MaxConcurrent:   0,
 		QueueSize:       32,
 		QueueTimeout:    60 * time.Second,

@@ -527,13 +527,19 @@ peers:
           data_collection: "deny"
           zdr: true
 
-    # headers: override headers sent to this peer
+    # addHeaders: add or override headers sent to this peer
     # - optional, default: empty dictionary
-    # - non-empty string: set/override header value
-    # - empty string: delete header
-    headers:
+    # - sets header values on outgoing requests
+    addHeaders:
       X-Custom-Header: "custom-value"
-      X-Remove-Me: ""
+
+    # removeHeaders: remove headers from requests sent to this peer
+    # - optional, default: empty list
+    # - removes headers by name, including X-Forwarded-For which is
+    #   automatically injected by the reverse proxy
+    removeHeaders:
+      - X-Forwarded-For
+      - Origin
 
     # maxConcurrent: maximum concurrent requests to this peer
     # - optional, default: 0 (unlimited)

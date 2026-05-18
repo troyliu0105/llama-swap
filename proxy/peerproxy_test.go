@@ -303,7 +303,7 @@ func TestProxyRequest_HeaderOverride(t *testing.T) {
 			Proxy:    testServer.URL,
 			ProxyURL: proxyURL,
 			Models:   []string{"test-model"},
-			Headers: map[string]string{
+			AddHeaders: map[string]string{
 				"X-Custom-Header": "custom-value",
 				"X-Override-Me":   "overridden",
 			},
@@ -339,8 +339,8 @@ func TestProxyRequest_HeaderDelete(t *testing.T) {
 			Proxy:    testServer.URL,
 			ProxyURL: proxyURL,
 			Models:   []string{"test-model"},
-			Headers: map[string]string{
-				"X-Delete-Me": "",
+			RemoveHeaders: []string{
+				"X-Delete-Me",
 			},
 		},
 	}
@@ -374,9 +374,11 @@ func TestProxyRequest_HeaderOverrideAfterApiKey(t *testing.T) {
 			ProxyURL: proxyURL,
 			ApiKey:   "api-key-value",
 			Models:   []string{"test-model"},
-			Headers: map[string]string{
+			AddHeaders: map[string]string{
 				"Authorization": "Custom-Auth",
-				"x-api-key":     "",
+			},
+			RemoveHeaders: []string{
+				"x-api-key",
 			},
 		},
 	}
@@ -840,7 +842,7 @@ func TestProxyRequest_RemoveHeadersCombinedWithHeaders(t *testing.T) {
 			Proxy:    testServer.URL,
 			ProxyURL: proxyURL,
 			Models:   []string{"test-model"},
-			Headers: map[string]string{
+			AddHeaders: map[string]string{
 				"User-Agent": "llama-swap/1.0",
 			},
 			RemoveHeaders: []string{

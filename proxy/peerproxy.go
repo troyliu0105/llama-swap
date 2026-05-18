@@ -23,7 +23,7 @@ type peerProxyMember struct {
 	peerID        string
 	reverseProxy  *httputil.ReverseProxy
 	apiKey        string
-	headers       map[string]string
+	addHeaders    map[string]string
 	removeHeaders []string
 	stripV1Prefix bool
 
@@ -207,7 +207,7 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, prox
 			peerID:          peerID,
 			reverseProxy:    reverseProxy,
 			apiKey:          peer.ApiKey,
-			headers:         peer.Headers,
+			addHeaders:      peer.AddHeaders,
 			removeHeaders:   peer.RemoveHeaders,
 			stripV1Prefix:   peer.StripV1Prefix,
 			maxConcurrent:   peer.MaxConcurrent,
@@ -485,10 +485,8 @@ func (p *PeerProxy) ProxyRequest(model_id string, writer http.ResponseWriter, re
 		request.Header.Set("x-api-key", pp.apiKey)
 	}
 
-	for key, value := range pp.headers {
-		if value == "" {
-			request.Header.Del(key)
-		} else {
+	for key, value := range pp.addHeaders {
+		if value != "" {
 			request.Header.Set(key, value)
 		}
 	}
