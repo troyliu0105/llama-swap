@@ -758,6 +758,112 @@ func TestGetOriginalModelName(t *testing.T) {
 	})
 }
 
+func TestProxyRequest_RemoveHeaders(t *testing.T) {
+	var receivedHeaders http.Header
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			Models:   []string{"test-model"},
+			RemoveHeaders: []string{
+				"X-Remove-Me",
+				"X-Also-Remove",
+			},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("X-Remove-Me", "should-be-removed")
+	req.Header.Set("X-Also-Remove", "should-also-be-removed")
+	req.Header.Set("X-Keep-Me", "kept")
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	assert.NoError(t, err)
+	assert.Empty(t, receivedHeaders.Get("X-Remove-Me"))
+	assert.Empty(t, receivedHeaders.Get("X-Also-Remove"))
+	assert.Equal(t, "kept", receivedHeaders.Get("X-Keep-Me"))
+}
+
+func TestProxyRequest_RemoveHeadersXForwardedFor(t *testing.T) {
+	var receivedXFF string
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedXFF = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			Models:   []string{"test-model"},
+			RemoveHeaders: []string{
+				"X-Forwarded-For",
+			},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	assert.NoError(t, err)
+	assert.Empty(t, receivedXFF, "X-Forwarded-For should be stripped even though ServeHTTP injects it")
+}
+
+func TestProxyRequest_RemoveHeadersCombinedWithHeaders(t *testing.T) {
+	var receivedHeaders http.Header
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    testServer.URL,
+			ProxyURL: proxyURL,
+			Models:   []string{"test-model"},
+			Headers: map[string]string{
+				"User-Agent": "llama-swap/1.0",
+			},
+			RemoveHeaders: []string{
+				"X-Forwarded-For",
+				"Origin",
+			},
+		},
+	}
+
+	pm, err := NewPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Origin", "http://client.example.com")
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	assert.NoError(t, err)
+	assert.Equal(t, "llama-swap/1.0", receivedHeaders.Get("User-Agent"))
+	assert.Empty(t, receivedHeaders.Get("X-Forwarded-For"))
+	assert.Empty(t, receivedHeaders.Get("Origin"))
+}
+
 func TestNewPeerProxy_PerPeerPrefix(t *testing.T) {
 	proxyURL1, _ := url.Parse("http://peer1.example.com:8080")
 	proxyURL2, _ := url.Parse("http://peer2.example.com:8080")

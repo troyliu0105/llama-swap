@@ -249,6 +249,34 @@ timeout: 120s
 	}
 }
 
+func TestPeerConfig_WithRemoveHeaders(t *testing.T) {
+	yamlData := `
+proxy: http://192.168.1.23:8080
+models:
+  - model_a
+headers:
+  User-Agent: llama-swap/1.0
+removeHeaders:
+  - X-Forwarded-For
+  - Origin
+`
+	var config PeerConfig
+	err := yaml.Unmarshal([]byte(yamlData), &config)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(config.RemoveHeaders) != 2 {
+		t.Errorf("expected 2 removeHeaders, got %d", len(config.RemoveHeaders))
+	}
+	if config.RemoveHeaders[0] != "X-Forwarded-For" {
+		t.Errorf("expected X-Forwarded-For, got %s", config.RemoveHeaders[0])
+	}
+	if config.RemoveHeaders[1] != "Origin" {
+		t.Errorf("expected Origin, got %s", config.RemoveHeaders[1])
+	}
+}
+
 func TestPeerConfig_DefaultsForNewFields(t *testing.T) {
 	yamlData := `
 proxy: http://192.168.1.23:8080

@@ -24,6 +24,7 @@ type peerProxyMember struct {
 	reverseProxy  *httputil.ReverseProxy
 	apiKey        string
 	headers       map[string]string
+	removeHeaders []string
 	stripV1Prefix bool
 
 	maxConcurrent   int
@@ -193,11 +194,21 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, prox
 			http.Error(w, errMsg, http.StatusBadGateway)
 		}
 
+		// ServeHTTP injects X-Forwarded-For after Director, so strip via Transport.
+		if len(peer.RemoveHeaders) > 0 {
+			removeHeaders := peer.RemoveHeaders
+			reverseProxy.Transport = &headerStrippingRoundTripper{
+				Transport:    peerTransport,
+				RemoveHeader: removeHeaders,
+			}
+		}
+
 		pp := &peerProxyMember{
 			peerID:          peerID,
 			reverseProxy:    reverseProxy,
 			apiKey:          peer.ApiKey,
 			headers:         peer.Headers,
+			removeHeaders:   peer.RemoveHeaders,
 			stripV1Prefix:   peer.StripV1Prefix,
 			maxConcurrent:   peer.MaxConcurrent,
 			queueSize:       peer.QueueSize,
@@ -482,6 +493,10 @@ func (p *PeerProxy) ProxyRequest(model_id string, writer http.ResponseWriter, re
 		}
 	}
 
+	for _, key := range pp.removeHeaders {
+		request.Header.Del(key)
+	}
+
 	if pp.stripV1Prefix {
 		request.URL.Path = strings.TrimPrefix(request.URL.Path, "/v1")
 		if request.URL.Path == "" {
@@ -502,4 +517,16 @@ func (p *PeerProxy) ProxyRequest(model_id string, writer http.ResponseWriter, re
 	pp.reverseProxy.ServeHTTP(writer, request)
 	pp.markRequestComplete()
 	return nil
+}
+
+type headerStrippingRoundTripper struct {
+	Transport    http.RoundTripper
+	RemoveHeader []string
+}
+
+func (rt *headerStrippingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	for _, key := range rt.RemoveHeader {
+		req.Header.Del(key)
+	}
+	return rt.Transport.RoundTrip(req)
 }

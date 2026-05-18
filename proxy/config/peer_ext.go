@@ -18,6 +18,7 @@ type ExtendedPeerConfig struct {
 
 	// Extended fields
 	Headers          map[string]string `yaml:"headers"`
+	RemoveHeaders    []string          `yaml:"removeHeaders"`
 	MaxConcurrent    int               `yaml:"maxConcurrent"`
 	QueueSize        int               `yaml:"queueSize"`
 	QueueTimeout     time.Duration     `yaml:"queueTimeout"`

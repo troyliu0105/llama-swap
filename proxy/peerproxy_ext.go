@@ -103,6 +103,7 @@ type enhancedPeerMember struct {
 	reverseProxy  *httputil.ReverseProxy
 	apiKey        string
 	headers       map[string]string
+	removeHeaders []string
 	stripV1Prefix bool
 	maxConcurrent int
 	queueSize     int
@@ -173,6 +174,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			peerID:          peerID,
 			apiKey:          peer.ApiKey,
 			headers:         peer.Headers,
+			removeHeaders:   peer.RemoveHeaders,
 			stripV1Prefix:   peer.StripV1Prefix,
 			maxConcurrent:   peer.MaxConcurrent,
 			queueSize:       peer.QueueSize,
@@ -366,6 +368,13 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 
 		pp.reverseProxy = reverseProxy
 
+		if len(peer.RemoveHeaders) > 0 {
+			pp.reverseProxy.Transport = &headerStrippingRoundTripper{
+				Transport:    peerTransport,
+				RemoveHeader: peer.RemoveHeaders,
+			}
+		}
+
 		if peer.MaxConcurrent > 0 {
 			pp.sem = make(chan struct{}, peer.MaxConcurrent)
 			pp.queue = make(chan *queuedRequest, peer.QueueSize)
@@ -514,6 +523,10 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 			} else {
 				request.Header.Set(key, value)
 			}
+		}
+
+		for _, key := range pp.removeHeaders {
+			request.Header.Del(key)
 		}
 
 		if pp.stripV1Prefix {
