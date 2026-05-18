@@ -10,6 +10,7 @@ import type {
   PerformanceResponse,
 } from "../lib/types";
 import { connectionState } from "./theme";
+import { currentRoute } from "./route";
 
 const LOG_LENGTH_LIMIT = 1024 * 100; /* 100KB of log data */
 
@@ -108,6 +109,9 @@ export function enableAPIEvents(enabled: boolean): void {
             break;
           }
           case "codexQuota": {
+            let route: string;
+            currentRoute.subscribe((r) => (route = r))();
+            if (route !== "/codex") break;
             fetchCodexAccounts().then((accounts) => {
               if (accounts.length > 0) {
                 codexAccounts.set(accounts);
