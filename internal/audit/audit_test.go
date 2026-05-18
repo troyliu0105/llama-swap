@@ -540,6 +540,27 @@ func TestAuditStore_GetCodexAccountStats(t *testing.T) {
 	assert.InDelta(t, 7.0/3.0, b.CacheHitRate, 0.001)
 }
 
+func TestAuditStore_GetCodexAccountStats_ExcludesNoCacheRows(t *testing.T) {
+	store, _ := newTestAuditStore(t, 0, 1)
+	defer closeStore(t, store)
+
+	// Request with cache data: input=100, cached=80 → included in both
+	recordCodexRequest(store, "key1", "User1", "gpt-5", "acct", 100, 10, 80)
+	// Request without cache data (cached_tokens=-1): input=50 → excluded from rate calc
+	recordCodexRequest(store, "key1", "User1", "gpt-5", "acct", 50, 5, -1)
+	eventuallyCount(t, store.db, `SELECT COUNT(*) FROM request_log`, 2)
+
+	entries, err := store.GetCodexAccountStats("7d")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	a := entries[0]
+	assert.Equal(t, int64(2), a.TotalRequests)
+	assert.Equal(t, int64(80), a.CachedTokens)
+	assert.Equal(t, int64(100), a.InputTokens)
+	assert.InDelta(t, 0.8, a.CacheHitRate, 0.001)
+}
+
 func TestAuditStore_GetCodexUsage_NoData(t *testing.T) {
 	store, _ := newTestAuditStore(t, 0, 1)
 	defer closeStore(t, store)
