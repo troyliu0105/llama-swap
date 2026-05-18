@@ -13,7 +13,7 @@
   async function loadAccounts() {
     accountsLoading = true;
     try {
-      const accounts = await fetchCodexAccounts();
+      const accounts = await fetchCodexAccounts(period);
       codexAccounts.set(accounts);
 
       if (accounts.length === 0) {
@@ -42,7 +42,7 @@
 
   async function changePeriod(newPeriod: string) {
     period = newPeriod;
-    await loadUsage(period);
+    await Promise.all([loadAccounts(), loadUsage(period)]);
   }
 
   async function loadData() {

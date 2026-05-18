@@ -125,8 +125,8 @@
             <dd>{account.stats ? formatNumber(account.stats.totalRequests) : "-"}</dd>
           </div>
           <div>
-            <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Cache Hits</dt>
-            <dd>{account.stats ? formatNumber(account.stats.cacheHits) : "-"}</dd>
+            <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Cached Tokens</dt>
+            <dd>{account.stats ? formatNumber(account.stats.cachedTokens) : "-"}</dd>
           </div>
           <div>
             <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Cache Rate</dt>

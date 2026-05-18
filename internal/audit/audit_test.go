@@ -504,7 +504,7 @@ func TestAuditStore_GetCodexAccountStats_NoData(t *testing.T) {
 	store, _ := newTestAuditStore(t, 0, 1)
 	defer closeStore(t, store)
 
-	entries, err := store.GetCodexAccountStats()
+	entries, err := store.GetCodexAccountStats("7d")
 	require.NoError(t, err)
 	assert.Empty(t, entries)
 }
@@ -518,7 +518,7 @@ func TestAuditStore_GetCodexAccountStats(t *testing.T) {
 	recordRequest(store, "key1", "local-model", "/v1/chat/completions", 100, 200, 50, nil, "")
 	eventuallyCount(t, store.db, `SELECT COUNT(*) FROM request_log`, 4)
 
-	entries, err := store.GetCodexAccountStats()
+	entries, err := store.GetCodexAccountStats("7d")
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
 
@@ -529,13 +529,15 @@ func TestAuditStore_GetCodexAccountStats(t *testing.T) {
 
 	a := byAccount["account-a"]
 	assert.Equal(t, int64(2), a.TotalRequests)
-	assert.Equal(t, int64(1), a.CacheHits)
-	assert.InDelta(t, 0.5, a.CacheHitRate, 0.001)
+	assert.Equal(t, int64(5), a.CachedTokens)
+	assert.Equal(t, int64(11), a.InputTokens)
+	assert.InDelta(t, 5.0/11.0, a.CacheHitRate, 0.001)
 
 	b := byAccount["account-b"]
 	assert.Equal(t, int64(1), b.TotalRequests)
-	assert.Equal(t, int64(1), b.CacheHits)
-	assert.InDelta(t, 1.0, b.CacheHitRate, 0.001)
+	assert.Equal(t, int64(7), b.CachedTokens)
+	assert.Equal(t, int64(3), b.InputTokens)
+	assert.InDelta(t, 7.0/3.0, b.CacheHitRate, 0.001)
 }
 
 func TestAuditStore_GetCodexUsage_NoData(t *testing.T) {

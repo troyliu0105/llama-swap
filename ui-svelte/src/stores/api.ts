@@ -298,7 +298,8 @@ export interface CodexAccount {
   stats: {
     name: string;
     totalRequests: number;
-    cacheHits: number;
+    cachedTokens: number;
+    inputTokens: number;
     cacheHitRate: number;
   } | null;
   model_limits: Record<string, CodexModelLimitSnapshot>;
@@ -381,9 +382,9 @@ export async function fetchPerformance(after?: string): Promise<PerformanceRespo
   }
 }
 
-export async function fetchCodexAccounts(): Promise<CodexAccount[]> {
+export async function fetchCodexAccounts(period: string = "7d"): Promise<CodexAccount[]> {
   try {
-    const response = await fetch("/api/codex/accounts");
+    const response = await fetch(`/api/codex/accounts?period=${period}`);
     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
     return await response.json();
   } catch (error) {

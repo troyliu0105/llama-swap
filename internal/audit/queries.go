@@ -44,7 +44,8 @@ type CodexUsageEntry struct {
 type CodexAccountStatsEntry struct {
 	CodexAccount  string  `json:"codex_account"`
 	TotalRequests int64   `json:"totalRequests"`
-	CacheHits     int64   `json:"cacheHits"`
+	CachedTokens  int64   `json:"cachedTokens"`
+	InputTokens   int64   `json:"inputTokens"`
 	CacheHitRate  float64 `json:"cacheHitRate"`
 }
 
@@ -161,16 +162,18 @@ func (s *AuditStore) GetUserUsage(userID int64, period string) ([]ModelUsageEntr
 	return entries, nil
 }
 
-func (s *AuditStore) GetCodexAccountStats() ([]CodexAccountStatsEntry, error) {
+func (s *AuditStore) GetCodexAccountStats(period string) ([]CodexAccountStatsEntry, error) {
+	since := periodSince(period)
 	rows, err := s.db.Query(`
 		SELECT codex_account,
 			COUNT(*),
-			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(cached_tokens), 0),
+			COALESCE(SUM(input_tokens), 0)
 		FROM request_log
-		WHERE codex_account IS NOT NULL
+		WHERE codex_account IS NOT NULL AND created_at >= ?
 		GROUP BY codex_account
 		ORDER BY codex_account
-	`)
+	`, since)
 	if err != nil {
 		return nil, fmt.Errorf("get codex account stats: %w", err)
 	}
@@ -179,11 +182,11 @@ func (s *AuditStore) GetCodexAccountStats() ([]CodexAccountStatsEntry, error) {
 	entries := make([]CodexAccountStatsEntry, 0)
 	for rows.Next() {
 		var entry CodexAccountStatsEntry
-		if err := rows.Scan(&entry.CodexAccount, &entry.TotalRequests, &entry.CacheHits); err != nil {
+		if err := rows.Scan(&entry.CodexAccount, &entry.TotalRequests, &entry.CachedTokens, &entry.InputTokens); err != nil {
 			return nil, fmt.Errorf("scan codex account stats: %w", err)
 		}
-		if entry.TotalRequests > 0 {
-			entry.CacheHitRate = float64(entry.CacheHits) / float64(entry.TotalRequests)
+		if entry.InputTokens > 0 {
+			entry.CacheHitRate = float64(entry.CachedTokens) / float64(entry.InputTokens)
 		}
 		entries = append(entries, entry)
 	}

@@ -122,12 +122,20 @@ func (s *AuditStore) RecordRequest(metricID int, apiKey, userName, model, reqPat
 }
 
 func (s *AuditStore) configureDB() error {
-	s.db.SetMaxOpenConns(1)
+	// Allow 2 open connections so WAL-mode concurrent readers don't block
+	// on the writer goroutine. SQLite's WAL journal handles safety; the Go
+	// pool only needs to ensure at most one writer at a time (the writer
+	// goroutine serialises all writes).
+	s.db.SetMaxOpenConns(2)
 
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
+		"PRAGMA busy_timeout=10000",
 		"PRAGMA foreign_keys=ON",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA cache_size=-16384",
+		"PRAGMA temp_store=MEMORY",
+		"PRAGMA mmap_size=268435456",
 	}
 
 	for _, pragma := range pragmas {

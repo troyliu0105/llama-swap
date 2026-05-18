@@ -266,6 +266,8 @@ type AccountStatsSnapshot struct {
 	Name         string  `json:"name"`
 	TotalReqs    int64   `json:"totalRequests"`
 	CacheHits    int64   `json:"cacheHits"`
+	CachedTokens int64   `json:"cachedTokens"`
+	InputTokens  int64   `json:"inputTokens"`
 	CacheHitRate float64 `json:"cacheHitRate"`
 }
 

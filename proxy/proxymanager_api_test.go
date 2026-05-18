@@ -84,7 +84,7 @@ func TestCollectCodexAccounts_WithProxy(t *testing.T) {
 		"codex-mini": codexProxy,
 	}
 
-	accounts := collectCodexAccounts(codexProxies, nil)
+	accounts := collectCodexAccounts(codexProxies, nil, "7d")
 	require.Len(t, accounts, 2, "collectCodexAccounts should return accounts from balancer even with empty auth store")
 
 	names := make(map[string]bool)
@@ -141,7 +141,7 @@ func TestCollectCodexAccounts_WithAuthAndQuota(t *testing.T) {
 		"codex-mini": codexProxy,
 	}
 
-	accounts := collectCodexAccounts(codexProxies, nil)
+	accounts := collectCodexAccounts(codexProxies, nil, "7d")
 	require.Len(t, accounts, 1)
 
 	acct := accounts[0]

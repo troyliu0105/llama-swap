@@ -484,11 +484,12 @@ func (pm *ProxyManager) apiCodexAccounts(c *gin.Context) {
 		return
 	}
 
-	accounts := collectCodexAccounts(codexProxies, pm.auditStore)
+	period := c.DefaultQuery("period", "7d")
+	accounts := collectCodexAccounts(codexProxies, pm.auditStore, period)
 	c.JSON(http.StatusOK, accounts)
 }
 
-func collectCodexAccounts(codexProxies map[string]*codex.Proxy, auditStore *audit.AuditStore) []codexAccountInfo {
+func collectCodexAccounts(codexProxies map[string]*codex.Proxy, auditStore *audit.AuditStore, period string) []codexAccountInfo {
 	accounts := make(map[string]*codexAccountInfo)
 	quotaCapturedAt := make(map[string]time.Time)
 	ensureAccount := func(name string) *codexAccountInfo {
@@ -547,15 +548,11 @@ func collectCodexAccounts(codexProxies map[string]*codex.Proxy, auditStore *audi
 				continue
 			}
 			account.Stats.TotalReqs += stats.TotalReqs
-			account.Stats.CacheHits += stats.CacheHits
-			if account.Stats.TotalReqs > 0 {
-				account.Stats.CacheHitRate = float64(account.Stats.CacheHits) / float64(account.Stats.TotalReqs)
-			}
 		}
 	}
 
 	if auditStore != nil {
-		persisted, err := auditStore.GetCodexAccountStats()
+		persisted, err := auditStore.GetCodexAccountStats(period)
 		if err == nil {
 			for _, ps := range persisted {
 				if ps.CodexAccount == "" {
@@ -568,9 +565,10 @@ func collectCodexAccounts(codexProxies map[string]*codex.Proxy, auditStore *audi
 					}
 				}
 				account.Stats.TotalReqs += ps.TotalRequests
-				account.Stats.CacheHits += ps.CacheHits
-				if account.Stats.TotalReqs > 0 {
-					account.Stats.CacheHitRate = float64(account.Stats.CacheHits) / float64(account.Stats.TotalReqs)
+				account.Stats.CachedTokens += ps.CachedTokens
+				account.Stats.InputTokens += ps.InputTokens
+				if account.Stats.InputTokens > 0 {
+					account.Stats.CacheHitRate = float64(account.Stats.CachedTokens) / float64(account.Stats.InputTokens)
 				}
 			}
 		}
