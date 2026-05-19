@@ -203,5 +203,6 @@ RUN echo "llama.cpp: ${LLAMA_COMMIT_HASH}" > /versions.txt && \
 RUN mkdir -p /models && chown ${RUN_UID}:${RUN_UID} /models
 WORKDIR /models
 USER ${RUN_UID}
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["llama-swap"]
 CMD ["-config", "/etc/llama-swap/config/config.yaml", "-listen", "0.0.0.0:8080"]

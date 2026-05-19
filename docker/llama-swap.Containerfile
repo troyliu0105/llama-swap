@@ -44,4 +44,5 @@ RUN \
 COPY --chown=$UID:$GID config.example.yaml /app/config.yaml
 
 HEALTHCHECK CMD curl -f http://localhost:8080/ || exit 1
+STOPSIGNAL SIGTERM
 ENTRYPOINT [ "/app/llama-swap", "-config", "/app/config.yaml" ]
