@@ -159,11 +159,11 @@ func main() {
 	// Support for watching config and reloading when it changes
 	reloading := false
 	var reloadMutex sync.Mutex
-	reloadProxyManager := func() {
+	reloadProxyManager := func() bool {
 		reloadMutex.Lock()
 		if reloading {
 			reloadMutex.Unlock()
-			return
+			return false
 		}
 		reloading = true
 		reloadMutex.Unlock()
@@ -179,7 +179,7 @@ func main() {
 			conf, err = config.LoadConfig(*configPath)
 			if err != nil {
 				mainLogger.Warnf("Unable to reload configuration: %v", err)
-				return
+				return true
 			}
 
 			mainLogger.Debug("Configuration Changed")
@@ -191,7 +191,12 @@ func main() {
 			newPM.SetPerfMonitor(mon)
 			handler.Set(newPM)
 			if currentPM != nil {
-				go currentPM.Shutdown()
+				go func() {
+					timeout := conf.ShutdownTimeoutDuration()
+					ctx, cancel := context.WithTimeout(context.Background(), timeout)
+					defer cancel()
+					currentPM.Shutdown(ctx)
+				}()
 			}
 			mainLogger.Debug("Configuration Reloaded")
 
@@ -212,6 +217,7 @@ func main() {
 			newPM.SetPerfMonitor(mon)
 			handler.Set(newPM)
 		}
+		return true
 	}
 
 	// load the initial proxy manager
@@ -228,8 +234,8 @@ func main() {
 			(&configwatcher.Watcher{
 				Path:     absConfigPath,
 				Interval: configwatcher.DefaultInterval,
-				OnChange: func() {
-					reloadProxyManager()
+				OnChange: func() bool {
+					return reloadProxyManager()
 				},
 			}).Run(watcherCtx)
 		}()
@@ -249,18 +255,24 @@ func main() {
 					mon.Stop()
 				}
 				watcherCancel()
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+
+				timeout := conf.ShutdownTimeoutDuration()
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
 				defer cancel()
 
+				// Stop accepting new connections and wait for active requests
+				if err := srv.Shutdown(ctx); err != nil {
+					mainLogger.Warnf("HTTP server shutdown: %v, forcing close", err)
+					srv.Close()
+				}
+
+				// Now safely shut down upstream processes
 				if pm := handler.Get(); pm != nil {
-					pm.Shutdown()
+					pm.Shutdown(ctx)
 				} else {
 					mainLogger.Error("handler has no ProxyManager")
 				}
 
-				if err := srv.Shutdown(ctx); err != nil {
-					mainLogger.Errorf("Server shutdown: %v", err)
-				}
 				close(exitChan)
 				return
 			default:
