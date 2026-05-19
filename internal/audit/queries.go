@@ -344,6 +344,8 @@ func (s *AuditStore) GetMaxMetricID() (int, error) {
 func periodSince(period string) string {
 	var duration time.Duration
 	switch period {
+	case "5h":
+		duration = 5 * time.Hour
 	case "24h":
 		duration = 24 * time.Hour
 	case "7d":

@@ -738,3 +738,28 @@ func TestAuditStore_UserNameUpdate(t *testing.T) {
 	require.Len(t, users, 1)
 	assert.Equal(t, "Alice Updated", users[0].Name)
 }
+
+func TestPeriodSince(t *testing.T) {
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name         string
+		period       string
+		wantDuration time.Duration
+	}{
+		{"5h", "5h", 5 * time.Hour},
+		{"24h", "24h", 24 * time.Hour},
+		{"7d", "7d", 168 * time.Hour},
+		{"30d", "30d", 720 * time.Hour},
+		{"unknown defaults to 24h", "1h", 24 * time.Hour},
+		{"empty defaults to 24h", "", 24 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := periodSince(tt.period)
+			expectedTime := now.Add(-tt.wantDuration).Format("2006-01-02T15:04:05.000Z")
+			assert.Equal(t, expectedTime, got)
+		})
+	}
+}
