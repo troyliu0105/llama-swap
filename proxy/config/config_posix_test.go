@@ -233,6 +233,7 @@ groups:
 			},
 		},
 		HealthCheckTimeout: 15,
+		ShutdownTimeout:    DefaultShutdownTimeoutSeconds,
 		MetricsMaxInMemory: 1000,
 
 		Performance: PerformanceConfig{

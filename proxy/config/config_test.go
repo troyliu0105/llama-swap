@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1664,4 +1665,46 @@ peers:
 	assert.Equal(t, 10, peerConfig.Timeouts.TLSHandshake)
 	assert.Equal(t, 1, peerConfig.Timeouts.ExpectContinue)
 	assert.Equal(t, 90, peerConfig.Timeouts.IdleConn)
+}
+
+func TestConfig_ShutdownTimeoutDefault(t *testing.T) {
+	configYaml := `
+models:
+  model1:
+    cmd: test-server --port ${PORT}
+`
+	config, err := LoadConfigFromReader(strings.NewReader(configYaml))
+	require.NoError(t, err)
+	assert.Equal(t, DefaultShutdownTimeoutSeconds, config.ShutdownTimeout)
+	assert.Equal(t, time.Duration(DefaultShutdownTimeoutSeconds)*time.Second, config.ShutdownTimeoutDuration())
+}
+
+func TestConfig_ShutdownTimeoutCustom(t *testing.T) {
+	configYaml := `
+models:
+  model1:
+    cmd: test-server --port ${PORT}
+shutdownTimeout: 30
+`
+	config, err := LoadConfigFromReader(strings.NewReader(configYaml))
+	require.NoError(t, err)
+	assert.Equal(t, 30, config.ShutdownTimeout)
+	assert.Equal(t, 30*time.Second, config.ShutdownTimeoutDuration())
+}
+
+func TestConfig_ShutdownTimeoutRejectsInvalid(t *testing.T) {
+	configYaml := `
+models:
+  model1:
+    cmd: test-server --port ${PORT}
+shutdownTimeout: 0
+`
+	_, err := LoadConfigFromReader(strings.NewReader(configYaml))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shutdownTimeout must be greater than 0")
+}
+
+func TestConfig_ShutdownTimeoutDurationZeroSafe(t *testing.T) {
+	config := Config{ShutdownTimeout: 0}
+	assert.Equal(t, time.Duration(DefaultShutdownTimeoutSeconds)*time.Second, config.ShutdownTimeoutDuration())
 }

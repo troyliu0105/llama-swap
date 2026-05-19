@@ -16,11 +16,17 @@ import (
 )
 
 const DEFAULT_GROUP_ID = "(default)"
+
 const (
 	LogToStdoutProxy    = "proxy"
 	LogToStdoutUpstream = "upstream"
 	LogToStdoutBoth     = "both"
 	LogToStdoutNone     = "none"
+
+	// DefaultShutdownTimeoutSeconds is the default number of seconds to wait
+	// for in-flight requests to complete during shutdown before forcefully
+	// terminating upstream processes.
+	DefaultShutdownTimeoutSeconds = 10
 )
 
 type MacroEntry struct {
@@ -238,6 +244,7 @@ type AuditConfig struct {
 
 type Config struct {
 	HealthCheckTimeout int                    `yaml:"healthCheckTimeout"`
+	ShutdownTimeout    int                    `yaml:"shutdownTimeout"`
 	LogRequests        bool                   `yaml:"logRequests"`
 	LogLevel           string                 `yaml:"logLevel"`
 	LogTimeFormat      string                 `yaml:"logTimeFormat"`
@@ -306,6 +313,13 @@ func (c *Config) FindConfig(modelName string) (ModelConfig, string, bool) {
 	}
 }
 
+func (c *Config) ShutdownTimeoutDuration() time.Duration {
+	if c.ShutdownTimeout <= 0 {
+		return time.Duration(DefaultShutdownTimeoutSeconds) * time.Second
+	}
+	return time.Duration(c.ShutdownTimeout) * time.Second
+}
+
 func LoadConfig(path string) (Config, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -332,6 +346,7 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 	// Unmarshal into full Config with defaults
 	config := Config{
 		HealthCheckTimeout: 120,
+		ShutdownTimeout:    DefaultShutdownTimeoutSeconds,
 		StartPort:          5800,
 		LogLevel:           "info",
 		LogTimeFormat:      "",
@@ -345,6 +360,10 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 
 	if config.HealthCheckTimeout < 15 {
 		config.HealthCheckTimeout = 15
+	}
+
+	if config.ShutdownTimeout < 1 {
+		return Config{}, fmt.Errorf("shutdownTimeout must be greater than 0")
 	}
 
 	// Apply defaults for performance config when section is missing
