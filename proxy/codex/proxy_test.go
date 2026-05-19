@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -332,4 +333,99 @@ func TestProxy_GenerateSessionID_Format(t *testing.T) {
 		id := p.generateSessionID()
 		assert.Regexp(t, `^sess_[0-9a-f]{8}_\d+$`, id)
 	}
+}
+
+func TestProxy_RecordResponse_QuotaExhaustion_ImmediateFailover(t *testing.T) {
+	p := newTestProxy(t, []string{"acct1", "acct2"})
+	p.balancer = NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	account, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+
+	resetAt := time.Now().Add(1 * time.Hour).Unix()
+	headers := http.Header{
+		"X-Codex-Active-Limit":           {"primary"},
+		"X-Codex-Primary-Used-Percent":   {"100"},
+		"X-Codex-Primary-Reset-At":       {strconv.FormatInt(resetAt, 10)},
+		"X-Codex-Primary-Window-Minutes": {"300"},
+	}
+
+	p.RecordResponse("model-a", account, http.StatusTooManyRequests, nil, headers)
+
+	assert.True(t, p.balancer.IsQuotaExhausted(account))
+
+	selected, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+	assert.NotEqual(t, account, selected)
+}
+
+func TestProxy_RecordStreamingResponse_QuotaExhaustion_ImmediateFailover(t *testing.T) {
+	p := newTestProxy(t, []string{"acct1", "acct2"})
+	p.balancer = NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	account, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+
+	resetAt := time.Now().Add(1 * time.Hour).Unix()
+	headers := http.Header{
+		"X-Codex-Active-Limit":             {"secondary"},
+		"X-Codex-Secondary-Used-Percent":   {"100"},
+		"X-Codex-Secondary-Reset-At":       {strconv.FormatInt(resetAt, 10)},
+		"X-Codex-Secondary-Window-Minutes": {"10080"},
+	}
+
+	p.RecordStreamingResponse("model-a", account, http.StatusTooManyRequests, headers)
+
+	assert.True(t, p.balancer.IsQuotaExhausted(account))
+
+	selected, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+	assert.NotEqual(t, account, selected)
+}
+
+func TestProxy_RecordResponse_NonQuotaFailure_NoExhaustion(t *testing.T) {
+	p := newTestProxy(t, []string{"acct1", "acct2"})
+	p.balancer = NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	account, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+
+	p.RecordResponse("model-a", account, http.StatusInternalServerError, nil, nil)
+
+	assert.False(t, p.balancer.IsQuotaExhausted(account))
+}
+
+func TestProxy_RecordResponse_PartialQuota_NoExhaustion(t *testing.T) {
+	p := newTestProxy(t, []string{"acct1", "acct2"})
+	p.balancer = NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	account, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+
+	resetAt := time.Now().Add(1 * time.Hour).Unix()
+	headers := http.Header{
+		"X-Codex-Active-Limit":           {"primary"},
+		"X-Codex-Primary-Used-Percent":   {"80"},
+		"X-Codex-Primary-Reset-At":       {strconv.FormatInt(resetAt, 10)},
+		"X-Codex-Primary-Window-Minutes": {"300"},
+	}
+
+	p.RecordResponse("model-a", account, http.StatusTooManyRequests, nil, headers)
+
+	assert.False(t, p.balancer.IsQuotaExhausted(account))
+}
+
+func TestProxy_RecordResponse_SuccessClearsQuotaExhaustion(t *testing.T) {
+	p := newTestProxy(t, []string{"acct1", "acct2"})
+	p.balancer = NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	account, err := p.balancer.Select("model-a")
+	require.NoError(t, err)
+
+	p.balancer.RecordQuotaExhaustion(account, time.Now().Add(1*time.Hour))
+	assert.True(t, p.balancer.IsQuotaExhausted(account))
+
+	p.RecordResponse("model-a", account, http.StatusOK, []byte(`{"usage":{"prompt_tokens_details":{"cached_tokens":0}}}`), nil)
+
+	assert.False(t, p.balancer.IsQuotaExhausted(account))
 }

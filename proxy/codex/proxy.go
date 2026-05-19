@@ -127,26 +127,43 @@ func (p *Proxy) stripProxyHeaders(req *http.Request) {
 func (p *Proxy) RecordResponse(model, account string, statusCode int, responseBody []byte, headers http.Header) {
 	cacheHit := detectCacheHit(responseBody)
 	p.balancer.RecordResult(account, cacheHit)
-	if isFailureStatus(statusCode) {
-		p.balancer.RecordFailure(model, account)
-	} else {
+
+	if statusCode == http.StatusOK {
 		p.balancer.RecordSuccess(model, account)
+	} else {
+		p.recordQuotaHeaders(account, headers)
+		if resetAt, exhausted := p.detectQuotaExhaustion(account); exhausted {
+			p.balancer.RecordQuotaExhaustion(account, resetAt)
+			p.logger("[CODEX] ⛔ %s | %s | quota_exhausted | reset_at=%d", account, model, resetAt.Unix())
+		} else {
+			p.balancer.RecordFailure(model, account)
+		}
 	}
 
 	size := len(responseBody)
 	p.logger("[CODEX] ◀ %s | %s | %d | %s | cache=%v", account, model, statusCode, humanSize(size), cacheHit)
-	p.recordQuotaHeaders(account, headers)
+	if statusCode == http.StatusOK {
+		p.recordQuotaHeaders(account, headers)
+	}
 }
 
 func (p *Proxy) RecordStreamingResponse(model, account string, statusCode int, headers http.Header) {
 	p.balancer.RecordRequestOnly(account)
-	if isFailureStatus(statusCode) {
-		p.balancer.RecordFailure(model, account)
-	} else {
+	if statusCode == http.StatusOK {
 		p.balancer.RecordSuccess(model, account)
+	} else {
+		p.recordQuotaHeaders(account, headers)
+		if resetAt, exhausted := p.detectQuotaExhaustion(account); exhausted {
+			p.balancer.RecordQuotaExhaustion(account, resetAt)
+			p.logger("[CODEX] ⛔ %s | %s | quota_exhausted | reset_at=%d", account, model, resetAt.Unix())
+		} else {
+			p.balancer.RecordFailure(model, account)
+		}
 	}
 	p.logger("[CODEX] ◀ %s | %s | %d SSE | %s", account, model, statusCode, p.peerID)
-	p.recordQuotaHeaders(account, headers)
+	if statusCode == http.StatusOK {
+		p.recordQuotaHeaders(account, headers)
+	}
 }
 
 func (p *Proxy) RecordError(model, account string) {
@@ -222,6 +239,33 @@ func (p *Proxy) recordQuotaHeaders(account string, headers http.Header) {
 	if p.onQuotaPersist != nil {
 		p.onQuotaPersist(account, snapshot)
 	}
+}
+
+// detectQuotaExhaustion checks whether the account's active quota window is
+// exhausted. Returns the reset time and true if the account should be paused.
+// Must be called AFTER recordQuotaHeaders so the snapshot is up to date.
+func (p *Proxy) detectQuotaExhaustion(account string) (resetAt time.Time, exhausted bool) {
+	if p.quotaStore == nil || account == "" {
+		return time.Time{}, false
+	}
+
+	snapshot, ok := p.quotaStore.Get(account)
+	if !ok {
+		return time.Time{}, false
+	}
+
+	switch snapshot.ActiveLimit {
+	case "primary", "":
+		if snapshot.Primary.UsedPercent >= 100 && snapshot.Primary.ResetAt > 0 {
+			return time.Unix(snapshot.Primary.ResetAt, 0), true
+		}
+	case "secondary":
+		if snapshot.Secondary.UsedPercent >= 100 && snapshot.Secondary.ResetAt > 0 {
+			return time.Unix(snapshot.Secondary.ResetAt, 0), true
+		}
+	}
+
+	return time.Time{}, false
 }
 
 func (p *Proxy) generateSessionID() string {

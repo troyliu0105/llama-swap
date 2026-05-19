@@ -61,6 +61,12 @@ type Balancer struct {
 	maxFails int
 	cooldown time.Duration
 
+	// quotaExhaustedUntil tracks per-account quota exhaustion. An account
+	// entry means the account should not be selected until the given time.
+	// The time is derived from the upstream reset_at header so the account
+	// automatically becomes available again when the quota window resets.
+	quotaExhaustedUntil map[string]time.Time
+
 	rrCounter atomic.Uint64
 }
 
@@ -75,12 +81,13 @@ func NewBalancer(accounts []string, strategy string) *Balancer {
 		strategy = "sticky"
 	}
 	return &Balancer{
-		accounts: append([]string(nil), accounts...),
-		stats:    stats,
-		models:   make(map[string]*modelState),
-		strategy: strategy,
-		maxFails: 3,
-		cooldown: 5 * time.Minute,
+		accounts:            append([]string(nil), accounts...),
+		stats:               stats,
+		models:              make(map[string]*modelState),
+		strategy:            strategy,
+		maxFails:            3,
+		cooldown:            5 * time.Minute,
+		quotaExhaustedUntil: make(map[string]time.Time),
 	}
 }
 
@@ -113,6 +120,9 @@ func (b *Balancer) selectStickyLocked(model string) string {
 		if _, exists := b.stats[state.account]; !exists {
 			state.account = ""
 			state.failCount = 0
+		} else if b.isQuotaExhaustedLocked(state.account, now) {
+			state.account = ""
+			state.failCount = 0
 		} else if state.failCount < b.maxFails {
 			return state.account
 		} else if !b.inCooldownLocked(state, state.account, now) {
@@ -123,7 +133,7 @@ func (b *Balancer) selectStickyLocked(model string) string {
 
 	selected := b.nextAvailableAccountLocked(state, now)
 	if selected == "" {
-		selected = b.earliestCooldownAccountLocked(state)
+		selected = b.earliestAvailableAccountLocked(state, now)
 	}
 	state.account = selected
 	state.failCount = 0
@@ -149,6 +159,9 @@ func (b *Balancer) nextAvailableAccountLocked(state *modelState, now time.Time) 
 
 	for i := 0; i < len(b.accounts); i++ {
 		account := b.accounts[(start+i)%len(b.accounts)]
+		if b.isQuotaExhaustedLocked(account, now) {
+			continue
+		}
 		if !b.inCooldownLocked(state, account, now) {
 			return account
 		}
@@ -156,10 +169,17 @@ func (b *Balancer) nextAvailableAccountLocked(state *modelState, now time.Time) 
 	return ""
 }
 
-func (b *Balancer) earliestCooldownAccountLocked(state *modelState) string {
+func (b *Balancer) earliestAvailableAccountLocked(state *modelState, now time.Time) string {
 	selected := b.accounts[0]
 	selectedExpiry := time.Time{}
 	for _, account := range b.accounts {
+		if until, ok := b.quotaExhaustedUntil[account]; ok && now.Before(until) {
+			if selectedExpiry.IsZero() || until.Before(selectedExpiry) {
+				selected = account
+				selectedExpiry = until
+			}
+			continue
+		}
 		lastFail, ok := state.lastFailAt[account]
 		if !ok {
 			return account
@@ -190,6 +210,51 @@ func (b *Balancer) inCooldownLocked(state *modelState, account string, now time.
 	return now.Before(lastFail.Add(b.cooldown))
 }
 
+func (b *Balancer) isQuotaExhaustedLocked(account string, now time.Time) bool {
+	until, ok := b.quotaExhaustedUntil[account]
+	if !ok {
+		return false
+	}
+	return now.Before(until)
+}
+
+// RecordQuotaExhaustion marks an account as quota-exhausted until the given
+// reset time. The account will not be selected by any model until then.
+func (b *Balancer) RecordQuotaExhaustion(account string, resetAt time.Time) {
+	if account == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, exists := b.stats[account]; !exists {
+		return
+	}
+	b.quotaExhaustedUntil[account] = resetAt
+}
+
+// IsQuotaExhausted reports whether an account is currently quota-exhausted.
+func (b *Balancer) IsQuotaExhausted(account string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.isQuotaExhaustedLocked(account, time.Now())
+}
+
+// QuotaExhaustedAccounts returns accounts currently quota-exhausted with
+// their reset times.
+func (b *Balancer) QuotaExhaustedAccounts() map[string]time.Time {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	now := time.Now()
+	result := make(map[string]time.Time)
+	for account, until := range b.quotaExhaustedUntil {
+		if now.Before(until) {
+			result[account] = until
+		}
+	}
+	return result
+}
+
 // RecordSuccess clears consecutive failures for the model/account pair.
 func (b *Balancer) RecordSuccess(model, account string) {
 	if account == "" {
@@ -206,6 +271,7 @@ func (b *Balancer) RecordSuccess(model, account string) {
 		b.models[model] = state
 	}
 	delete(state.lastFailAt, account)
+	delete(b.quotaExhaustedUntil, account)
 	if state.account == "" || state.account == account {
 		state.account = account
 		state.failCount = 0
@@ -303,6 +369,7 @@ func (b *Balancer) RemoveAccount(name string) {
 	defer b.mu.Unlock()
 
 	delete(b.stats, name)
+	delete(b.quotaExhaustedUntil, name)
 	for i, n := range b.accounts {
 		if n == name {
 			b.accounts = append(b.accounts[:i], b.accounts[i+1:]...)

@@ -221,3 +221,99 @@ func TestBalancer_ResetAffinity(t *testing.T) {
 	assert.NotContains(t, b.models, "missing-model")
 	assert.NotPanics(t, func() { b.RecordSuccess("model-x", first) })
 }
+
+func TestBalancer_QuotaExhaustion_SkipsAccount(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	resetAt := time.Now().Add(1 * time.Hour)
+	b.RecordQuotaExhaustion("acct1", resetAt)
+
+	selected, err := b.Select("model-x")
+	require.NoError(t, err)
+	assert.Equal(t, "acct2", selected)
+}
+
+func TestBalancer_QuotaExhaustion_AllExhausted(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	resetAt1 := time.Now().Add(1 * time.Hour)
+	resetAt2 := time.Now().Add(30 * time.Minute)
+	b.RecordQuotaExhaustion("acct1", resetAt1)
+	b.RecordQuotaExhaustion("acct2", resetAt2)
+
+	selected, err := b.Select("model-x")
+	require.NoError(t, err)
+	assert.Equal(t, "acct2", selected)
+}
+
+func TestBalancer_QuotaExhaustion_Recovery(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	resetAt := time.Now().Add(10 * time.Millisecond)
+	b.RecordQuotaExhaustion("acct1", resetAt)
+
+	selected, err := b.Select("model-x")
+	require.NoError(t, err)
+	assert.Equal(t, "acct2", selected)
+
+	time.Sleep(20 * time.Millisecond)
+
+	assert.False(t, b.IsQuotaExhausted("acct1"))
+}
+
+func TestBalancer_QuotaExhaustion_ClearedOnSuccess(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	b.RecordQuotaExhaustion("acct1", time.Now().Add(1*time.Hour))
+
+	assert.True(t, b.IsQuotaExhausted("acct1"))
+
+	b.RecordSuccess("model-x", "acct1")
+
+	assert.False(t, b.IsQuotaExhausted("acct1"))
+}
+
+func TestBalancer_QuotaExhaustion_RemovedWithAccount(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	b.RecordQuotaExhaustion("acct1", time.Now().Add(1*time.Hour))
+	b.RemoveAccount("acct1")
+
+	assert.False(t, b.IsQuotaExhausted("acct1"))
+}
+
+func TestBalancer_QuotaExhaustion_StickyFailsOver(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	selected, err := b.Select("model-x")
+	require.NoError(t, err)
+	require.Equal(t, "acct1", selected)
+
+	b.RecordQuotaExhaustion("acct1", time.Now().Add(1*time.Hour))
+
+	selected, err = b.Select("model-x")
+	require.NoError(t, err)
+	assert.Equal(t, "acct2", selected)
+}
+
+func TestBalancer_IsQuotaExhausted(t *testing.T) {
+	b := NewBalancer([]string{"acct1"}, "sticky")
+
+	assert.False(t, b.IsQuotaExhausted("acct1"))
+	assert.False(t, b.IsQuotaExhausted("nonexistent"))
+
+	b.RecordQuotaExhaustion("acct1", time.Now().Add(1*time.Hour))
+	assert.True(t, b.IsQuotaExhausted("acct1"))
+}
+
+func TestBalancer_QuotaExhaustedAccounts(t *testing.T) {
+	b := NewBalancer([]string{"acct1", "acct2"}, "sticky")
+
+	resetAt := time.Now().Add(1 * time.Hour)
+	b.RecordQuotaExhaustion("acct1", resetAt)
+
+	exhausted := b.QuotaExhaustedAccounts()
+	assert.Contains(t, exhausted, "acct1")
+	assert.NotContains(t, exhausted, "acct2")
+	assert.Equal(t, resetAt, exhausted["acct1"])
+}
