@@ -622,17 +622,27 @@ func (p *Process) StopImmediately() {
 	p.stopCommand()
 }
 
-// Shutdown is called when llama-swap is shutting down. It will give a little bit
-// of time for any inflight requests to complete before shutting down. If the Process
-// is in the state of starting, it will cancel it and shut it down. Once a process is in
-// the StateShutdown state, it can not be started again.
-func (p *Process) Shutdown() {
-	if !isValidTransition(p.CurrentState(), StateStopping) {
+// Shutdown is called when llama-swap is shutting down. It transitions to
+// StateStopping (which rejects new requests), waits for in-flight requests
+// to complete or for ctx to expire, then stops the upstream process.
+// Once a process is in StateShutdown it cannot be restarted.
+func (p *Process) Shutdown(ctx context.Context) {
+	enterState := p.CurrentState()
+	if !isValidTransition(enterState, StateStopping) {
 		return
 	}
 
+	if curState, err := p.swapState(enterState, StateStopping); err != nil {
+		p.proxyLogger.Infof("<%s> Shutdown() %s -> StateStopping err: %v, current state: %v", p.ID, enterState, err, curState)
+		return
+	}
+
+	if enterState == StateReady {
+		p.proxyLogger.Debugf("<%s> Shutdown(): Waiting for in-flight requests to complete", p.ID)
+		waitForWaitGroup(ctx, &p.inFlightRequests)
+	}
+
 	p.stopCommand()
-	// just force it to this state since there is no recovery from shutdown
 	p.forceState(StateShutdown)
 }
 
@@ -886,6 +896,18 @@ func (p *Process) cmdStopUpstreamProcess() error {
 // Logger returns the logger for this process.
 func (p *Process) Logger() *logmon.Monitor {
 	return p.processLogger
+}
+
+func waitForWaitGroup(ctx context.Context, wg *sync.WaitGroup) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 var loadingRemarks = []string{

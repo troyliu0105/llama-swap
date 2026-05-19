@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"slices"
@@ -286,13 +287,13 @@ func (m *Matrix) StopProcess(modelID string, strategy StopStrategy) error {
 }
 
 // Shutdown shuts down all processes.
-func (m *Matrix) Shutdown() {
+func (m *Matrix) Shutdown(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, process := range m.processes {
 		wg.Add(1)
 		go func(p *Process) {
 			defer wg.Done()
-			p.Shutdown()
+			p.Shutdown(ctx)
 		}(process)
 	}
 	wg.Wait()

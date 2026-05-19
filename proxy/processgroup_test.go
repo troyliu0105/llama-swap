@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -342,4 +343,54 @@ func TestProcessGroup_ProxyRequestSwapIsFalse(t *testing.T) {
 	for _, process := range pg.processes {
 		assert.Equal(t, StateReady, process.CurrentState())
 	}
+}
+
+func TestProcessGroup_ShutdownWaitsForInflight(t *testing.T) {
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  modelA:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond modelA
+  modelB:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond modelB
+groups:
+  testGroup:
+    swap: true
+    exclusive: false
+    members: ["modelA", "modelB"]
+`)
+
+	pg := NewProcessGroup("testGroup", cfg, debugLogger, debugLogger)
+
+	requestStarted := make(chan struct{})
+	requestFinished := make(chan struct{})
+
+	process, ok := pg.GetMember("modelA")
+	require.True(t, ok)
+	process.testHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		time.Sleep(300 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("done"))
+	})
+
+	go func() {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/test", nil)
+		pg.ProxyRequest("modelA", w, req)
+		close(requestFinished)
+	}()
+
+	<-requestStarted
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pg.Shutdown(ctx)
+	elapsed := time.Since(start)
+
+	<-requestFinished
+
+	assert.True(t, elapsed >= 250*time.Millisecond, "ProcessGroup.Shutdown should have waited for inflight request, took %v", elapsed)
 }

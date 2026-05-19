@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +24,7 @@ models:
 `)
 
 	proxy := New(cfg)
-	defer proxy.Shutdown()
+	defer proxy.Shutdown(context.Background())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/codex/accounts", nil)
 	w := httptest.NewRecorder()
@@ -49,7 +50,7 @@ models:
 `)
 
 	proxy := New(cfg)
-	defer proxy.Shutdown()
+	defer proxy.Shutdown(context.Background())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/codex/usage?period=7d", nil)
 	w := httptest.NewRecorder()

@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -578,7 +579,7 @@ func TestProxyManager_Shutdown(t *testing.T) {
 
 	go func() {
 		<-time.After(time.Second)
-		proxy.Shutdown()
+		proxy.Shutdown(context.Background())
 	}()
 	wg.Wait()
 }
@@ -2075,4 +2076,39 @@ models:
 	assert.Equal(t, 20, metrics[0].Tokens.InputTokens)
 	assert.Equal(t, 34, metrics[0].Tokens.OutputTokens)
 	assert.Equal(t, 3, metrics[0].Tokens.CachedTokens)
+}
+
+func TestProxyManager_ShutdownRejectsNewRequests(t *testing.T) {
+	conf := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
+
+	proxy := New(conf)
+	injectTestHandlers(proxy, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"model1"}`))
+	proxy.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	go proxy.Shutdown(context.Background())
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		proxy.drainMu.Lock()
+		d := proxy.draining
+		proxy.drainMu.Unlock()
+		if d {
+			break
+		}
+		runtime.Gosched()
+	}
+
+	w2 := httptest.NewRecorder()
+	proxy.ServeHTTP(w2, req)
+	assert.Equal(t, http.StatusServiceUnavailable, w2.Code)
 }

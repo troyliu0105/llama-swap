@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"slices"
@@ -181,13 +182,13 @@ func (pg *ProcessGroup) StopProcesses(strategy StopStrategy) {
 	wg.Wait()
 }
 
-func (pg *ProcessGroup) Shutdown() {
+func (pg *ProcessGroup) Shutdown(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, process := range pg.processes {
 		wg.Add(1)
 		go func(process *Process) {
 			defer wg.Done()
-			process.Shutdown()
+			process.Shutdown(ctx)
 		}(process)
 	}
 	wg.Wait()

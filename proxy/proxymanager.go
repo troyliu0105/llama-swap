@@ -91,6 +91,14 @@ type ProxyManager struct {
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
 
+	// drain gate: used during config reload to prevent the old PM from
+	// accepting new requests and to wait for in-flight requests to complete
+	// before closing the audit store. Not needed for SIGTERM path since
+	// srv.Shutdown handles HTTP draining there.
+	draining  bool
+	requestWG sync.WaitGroup
+	drainMu   sync.Mutex
+
 	// version info
 	buildDate string
 	commit    string
@@ -540,6 +548,16 @@ func (pm *ProxyManager) trackInflight() gin.HandlerFunc {
 
 // ServeHTTP implements http.Handler interface
 func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	pm.drainMu.Lock()
+	if pm.draining {
+		pm.drainMu.Unlock()
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	pm.requestWG.Add(1)
+	pm.drainMu.Unlock()
+	defer pm.requestWG.Done()
+
 	pm.ginEngine.ServeHTTP(w, r)
 }
 
@@ -570,39 +588,44 @@ func (pm *ProxyManager) StopProcesses(strategy StopStrategy) {
 }
 
 // Shutdown stops all processes managed by this ProxyManager
-func (pm *ProxyManager) Shutdown() {
-	pm.Lock()
-	defer pm.Unlock()
-
+func (pm *ProxyManager) Shutdown(ctx context.Context) {
 	pm.proxyLogger.Debug("Shutdown() called in proxy manager")
 
-	// Shut down peer proxies (stop queue goroutines, close transports)
+	// Mark as draining so new requests get 503
+	pm.drainMu.Lock()
+	pm.draining = true
+	pm.drainMu.Unlock()
+
+	// Shut down peer proxy first
 	if pm.peerProxy != nil {
 		pm.peerProxy.Shutdown()
 	}
 
+	// Shut down processes under the PM lock. This interrupts starting
+	// processes and waits for in-flight requests on ready processes.
+	pm.Lock()
 	if pm.matrix != nil {
-		pm.matrix.Shutdown()
-		if pm.auditStore != nil {
-			if err := pm.auditStore.Close(); err != nil {
-				pm.proxyLogger.Warnf("failed to close audit store: %v", err)
-			}
-			pm.auditStore = nil
+		pm.matrix.Shutdown(ctx)
+	} else {
+		var wg sync.WaitGroup
+		for _, processGroup := range pm.processGroups {
+			wg.Add(1)
+			go func(processGroup *ProcessGroup) {
+				defer wg.Done()
+				processGroup.Shutdown(ctx)
+			}(processGroup)
 		}
-		pm.shutdownCancel()
-		return
+		wg.Wait()
 	}
+	pm.Unlock()
 
-	var wg sync.WaitGroup
-	// Send shutdown signal to all process in groups
-	for _, processGroup := range pm.processGroups {
-		wg.Add(1)
-		go func(processGroup *ProcessGroup) {
-			defer wg.Done()
-			processGroup.Shutdown()
-		}(processGroup)
-	}
-	wg.Wait()
+	// Wait for any request handlers still in the Gin middleware chain
+	// to finish. This must be outside the PM lock to avoid deadlocking
+	// with requests that are blocked on pm.Lock() in swapProcessGroup().
+	waitForWaitGroup(ctx, &pm.requestWG)
+
+	// Close audit store last so pending audit records are flushed
+	pm.Lock()
 	if pm.auditStore != nil {
 		if err := pm.auditStore.Close(); err != nil {
 			pm.proxyLogger.Warnf("failed to close audit store: %v", err)
@@ -610,6 +633,7 @@ func (pm *ProxyManager) Shutdown() {
 		pm.auditStore = nil
 	}
 	pm.shutdownCancel()
+	pm.Unlock()
 }
 
 func (pm *ProxyManager) swapProcessGroup(realModelName string) (*ProcessGroup, error) {

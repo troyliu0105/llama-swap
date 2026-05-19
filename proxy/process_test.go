@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -369,12 +370,12 @@ func TestProcess_ShutdownInterruptsHealthCheck(t *testing.T) {
 
 	// start a goroutine to simulate a shutdown
 	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		<-time.After(time.Millisecond * 500)
-		process.Shutdown()
+		process.Shutdown(context.Background())
 	}()
-	wg.Add(1)
 
 	// start the process, this is a blocking call
 	err := process.start()
@@ -669,4 +670,132 @@ func TestProcess_CustomTimeouts(t *testing.T) {
 	assert.Equal(t, 2*time.Second, transport.ExpectContinueTimeout)
 	assert.Equal(t, 120*time.Second, transport.IdleConnTimeout)
 	assert.True(t, transport.ForceAttemptHTTP2)
+}
+
+func TestProcess_ShutdownWaitsForInflight(t *testing.T) {
+	config := getTestSimpleResponderConfig("shutdown-wait-test")
+
+	process := NewProcess("test-shutdown-wait", 5, config, debugLogger, debugLogger)
+
+	blockUntilReady := make(chan struct{})
+	process.testHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(blockUntilReady)
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("done"))
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req = req.WithContext(context.WithValue(req.Context(), proxyCtxKey("streaming"), false))
+	req = req.WithContext(context.WithValue(req.Context(), proxyCtxKey("model"), "test-shutdown-wait"))
+
+	var proxyWg sync.WaitGroup
+	proxyWg.Add(1)
+	go func() {
+		defer proxyWg.Done()
+		w := httptest.NewRecorder()
+		process.ProxyRequest(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+	}()
+
+	<-blockUntilReady
+
+	startShutdown := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	process.Shutdown(ctx)
+	elapsed := time.Since(startShutdown)
+
+	proxyWg.Wait()
+	assert.Equal(t, StateShutdown, process.CurrentState())
+	assert.True(t, elapsed >= 150*time.Millisecond, "Shutdown should have waited for inflight request, took %v", elapsed)
+}
+
+func TestProcess_ShutdownRejectsNewRequests(t *testing.T) {
+	config := getTestSimpleResponderConfig("reject-test")
+
+	process := NewProcess("test-reject", 5, config, debugLogger, debugLogger)
+	process.testHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req = req.WithContext(context.WithValue(req.Context(), proxyCtxKey("streaming"), false))
+	req = req.WithContext(context.WithValue(req.Context(), proxyCtxKey("model"), "test-reject"))
+	w := httptest.NewRecorder()
+	process.ProxyRequest(w, req)
+	assert.Equal(t, StateReady, process.CurrentState())
+
+	blockInRequest := make(chan struct{})
+	unblockRequest := make(chan struct{})
+	process.testHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(blockInRequest)
+		<-unblockRequest
+		w.WriteHeader(http.StatusOK)
+	})
+
+	var proxyWg sync.WaitGroup
+	proxyWg.Add(1)
+	go func() {
+		defer proxyWg.Done()
+		w := httptest.NewRecorder()
+		process.ProxyRequest(w, req)
+	}()
+
+	<-blockInRequest
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	go func() {
+		process.Shutdown(ctx)
+		cancel()
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if process.CurrentState() != StateReady {
+			break
+		}
+		runtime.Gosched()
+	}
+
+	rejectW := httptest.NewRecorder()
+	process.ProxyRequest(rejectW, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rejectW.Code)
+
+	unblockRequest <- struct{}{}
+	proxyWg.Wait()
+}
+
+func TestProcess_ShutdownTimeoutStopsWaiting(t *testing.T) {
+	config := getTestSimpleResponderConfig("timeout-test")
+
+	process := NewProcess("test-timeout", 5, config, debugLogger, debugLogger)
+
+	requestStarted := make(chan struct{})
+	process.testHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		time.Sleep(5 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req = req.WithContext(context.WithValue(req.Context(), proxyCtxKey("streaming"), false))
+	req = req.WithContext(context.WithValue(req.Context(), proxyCtxKey("model"), "test-timeout"))
+
+	go func() {
+		w := httptest.NewRecorder()
+		process.ProxyRequest(w, req)
+	}()
+
+	<-requestStarted
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	process.Shutdown(ctx)
+	cancel()
+	elapsed := time.Since(start)
+
+	assert.Equal(t, StateShutdown, process.CurrentState())
+	assert.True(t, elapsed < 500*time.Millisecond, "Shutdown should have timed out quickly, took %v", elapsed)
 }
