@@ -110,8 +110,8 @@
             </dd>
           </div>
           <div>
-            <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Credits</dt>
-            <dd>{account.credits.unlimited ? "unlimited" : account.credits.balance || "-"}</dd>
+            <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Total Tokens</dt>
+            <dd>{account.stats ? formatNumber(account.stats.inputTokens + account.stats.cachedTokens) : "-"}</dd>
           </div>
           <div>
             <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Requests</dt>
