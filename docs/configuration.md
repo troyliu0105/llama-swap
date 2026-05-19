@@ -112,6 +112,13 @@ llama-swap supports many more features to customize how you want to manage your 
 # - minimum value is 15 seconds, anything less will be set to this value
 healthCheckTimeout: 500
 
+# shutdownTimeout: number of seconds to wait for in-flight requests to complete
+# during graceful shutdown before forcefully terminating upstream processes.
+# - optional, default: 10
+# - must be greater than 0
+# - When running in Docker, set --stop-timeout to a value >= shutdownTimeout
+shutdownTimeout: 10
+
 # logLevel: sets the logging value
 # - optional, default: info
 # - Valid log levels: trace, debug, info, warn, error
