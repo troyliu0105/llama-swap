@@ -19,7 +19,11 @@ const DefaultInterval = 2 * time.Second
 type Watcher struct {
 	Path     string
 	Interval time.Duration
-	OnChange func()
+	// OnChange is called when a file change is detected. Return true to
+	// acknowledge the change (the watcher advances its baseline). Return
+	// false to reject it (the watcher keeps the old baseline so the
+	// change is re-detected on the next poll).
+	OnChange func() bool
 }
 
 type snapshot struct {
@@ -50,9 +54,12 @@ func (w *Watcher) Run(ctx context.Context) {
 		case <-ticker.C:
 			cur := stat(w.Path)
 			if changed(prev, cur) && w.OnChange != nil {
-				w.OnChange()
+				if w.OnChange() {
+					prev = cur
+				}
+			} else {
+				prev = cur
 			}
-			prev = cur
 		}
 	}
 }

@@ -56,7 +56,7 @@ func TestWatcher_NoFireOnBaseline(t *testing.T) {
 	stop := startWatcher(t, &Watcher{
 		Path:     path,
 		Interval: testInterval,
-		OnChange: func() { atomic.AddInt64(&n, 1) },
+		OnChange: func() bool { atomic.AddInt64(&n, 1); return true },
 	})
 	defer stop()
 
@@ -77,7 +77,7 @@ func TestWatcher_DetectsModTimeChange(t *testing.T) {
 	stop := startWatcher(t, &Watcher{
 		Path:     path,
 		Interval: testInterval,
-		OnChange: func() { atomic.AddInt64(&n, 1) },
+		OnChange: func() bool { atomic.AddInt64(&n, 1); return true },
 	})
 	defer stop()
 
@@ -103,7 +103,7 @@ func TestWatcher_DetectsSizeChangeWithSameModTime(t *testing.T) {
 	stop := startWatcher(t, &Watcher{
 		Path:     path,
 		Interval: testInterval,
-		OnChange: func() { atomic.AddInt64(&n, 1) },
+		OnChange: func() bool { atomic.AddInt64(&n, 1); return true },
 	})
 	defer stop()
 	time.Sleep(testInterval * 2)
@@ -135,7 +135,7 @@ func TestWatcher_SymlinkTargetSwap(t *testing.T) {
 	stop := startWatcher(t, &Watcher{
 		Path:     link,
 		Interval: testInterval,
-		OnChange: func() { atomic.AddInt64(&n, 1) },
+		OnChange: func() bool { atomic.AddInt64(&n, 1); return true },
 	})
 	defer stop()
 	time.Sleep(testInterval * 2)
@@ -158,7 +158,7 @@ func TestWatcher_FileMissingThenReturns(t *testing.T) {
 	stop := startWatcher(t, &Watcher{
 		Path:     path,
 		Interval: testInterval,
-		OnChange: func() { atomic.AddInt64(&n, 1) },
+		OnChange: func() bool { atomic.AddInt64(&n, 1); return true },
 	})
 	defer stop()
 	time.Sleep(testInterval * 2)
@@ -188,4 +188,40 @@ func TestWatcher_ContextCancelStopsRun(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return within 2s of cancel")
 	}
+}
+
+func TestWatcher_RejectedChangeRediscovered(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("a"), 0o644))
+
+	base := time.Now().Add(-1 * time.Hour).Truncate(time.Second)
+	require.NoError(t, os.Chtimes(path, base, base))
+
+	var n int64
+	accept := int64(0) // atomic: switch to 1 after first rejection
+	stop := startWatcher(t, &Watcher{
+		Path:     path,
+		Interval: testInterval,
+		OnChange: func() bool {
+			if atomic.LoadInt64(&accept) == 0 {
+				return false
+			}
+			atomic.AddInt64(&n, 1)
+			return true
+		},
+	})
+	defer stop()
+
+	time.Sleep(testInterval * 2)
+
+	require.NoError(t, os.Chtimes(path, base.Add(10*time.Second), base.Add(10*time.Second)))
+
+	time.Sleep(testInterval * 2)
+
+	require.Equal(t, int64(0), atomic.LoadInt64(&n), "rejected change must not increment counter")
+
+	atomic.StoreInt64(&accept, 1)
+
+	require.True(t, waitForCount(t, &n, 1, 2*time.Second), "rejected change must be re-detected and accepted")
 }
