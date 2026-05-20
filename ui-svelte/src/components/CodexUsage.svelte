@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fetchCodexUserUsage, type CodexUsageEntry, type CodexUserUsageEntry } from "../stores/api";
+  import { sumTokenTotalsWithRequests } from "../lib/tokenTotals";
 
   interface Props {
     usage: CodexUsageEntry[];
@@ -64,6 +65,9 @@
     selectedName = "";
     modelUsage = [];
   }
+
+  let usageTotals = $derived(sumTokenTotalsWithRequests(usage));
+  let modelTotals = $derived(sumTokenTotalsWithRequests(modelUsage));
 </script>
 
 <div class="mt-6 mb-4 flex items-center gap-3">
@@ -123,6 +127,19 @@
             <td class="px-6 py-4">{formatNumber(entry.request_count)}</td>
           </tr>
         {/each}
+        <tr class="whitespace-nowrap text-sm font-semibold border-t-2 border-gray-300 dark:border-gray-500">
+          <td class="px-6 py-4">Total</td>
+          <td class="px-6 py-4"></td>
+          <td class="px-6 py-4">{formatNumber(usageTotals.input_tokens)}</td>
+          <td class="px-6 py-4">{formatNumber(usageTotals.output_tokens)}</td>
+          <td class="px-6 py-4">{formatNumber(usageTotals.cached_tokens)}</td>
+          <td class="px-6 py-4">{formatNumber(usageTotals.request_count)}</td>
+        </tr>
+        <tr class="whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+          <td class="px-6 py-2" colspan="2"></td>
+          <td class="px-6 py-2 text-xs">Input + Output: {formatNumber(usageTotals.input_plus_output)}</td>
+          <td class="px-6 py-2" colspan="3"></td>
+        </tr>
       {/if}
     </tbody>
   </table>
@@ -171,6 +188,17 @@
               <td class="px-6 py-4">{formatNumber(model.request_count)}</td>
             </tr>
           {/each}
+          <tr class="whitespace-nowrap text-sm font-semibold border-t-2 border-gray-300 dark:border-gray-500">
+            <td class="px-6 py-4">Total</td>
+            <td class="px-6 py-4">{formatNumber(modelTotals.input_tokens)}</td>
+            <td class="px-6 py-4">{formatNumber(modelTotals.output_tokens)}</td>
+            <td class="px-6 py-4">{formatNumber(modelTotals.cached_tokens)}</td>
+            <td class="px-6 py-4">{formatNumber(modelTotals.request_count)}</td>
+          </tr>
+          <tr class="whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+            <td class="px-6 py-2 text-xs">Input + Output: {formatNumber(modelTotals.input_plus_output)}</td>
+            <td class="px-6 py-2" colspan="4"></td>
+          </tr>
         </tbody>
       </table>
     {/if}
