@@ -36,9 +36,10 @@ type AuditStore struct {
 	doneCh               chan struct{}
 	wg                   sync.WaitGroup
 	retentionDays        int
+	capturePurgeDays     int
 }
 
-func NewAuditStore(dbPath string, retentionDays int, captureFlushSize int, captureFlushIntervalSec int, logger *logmon.Monitor) (*AuditStore, error) {
+func NewAuditStore(dbPath string, retentionDays int, capturePurgeDays int, captureFlushSize int, captureFlushIntervalSec int, logger *logmon.Monitor) (*AuditStore, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, fmt.Errorf("create audit db directory: %w", err)
 	}
@@ -56,6 +57,7 @@ func NewAuditStore(dbPath string, retentionDays int, captureFlushSize int, captu
 		captureFlushInterval: time.Duration(captureFlushIntervalSec) * time.Second,
 		doneCh:               make(chan struct{}),
 		retentionDays:        retentionDays,
+		capturePurgeDays:     capturePurgeDays,
 	}
 
 	if store.captureFlushSize <= 0 {
@@ -80,6 +82,7 @@ func NewAuditStore(dbPath string, retentionDays int, captureFlushSize int, captu
 
 	store.wg.Go(store.writer)
 	store.startRetention()
+	store.startCapturePurge()
 
 	return store, nil
 }

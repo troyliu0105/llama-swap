@@ -15,7 +15,7 @@ func newTestAuditStore(t *testing.T, retentionDays int, captureFlushSize int) (*
 	t.Helper()
 
 	dbPath := filepath.Join(t.TempDir(), "audit.db")
-	store, err := NewAuditStore(dbPath, retentionDays, captureFlushSize, 1, nil)
+	store, err := NewAuditStore(dbPath, retentionDays, 0, captureFlushSize, 1, nil)
 	require.NoError(t, err)
 	return store, dbPath
 }
@@ -59,6 +59,14 @@ func queryInt(t *testing.T, db *sql.DB, query string, args ...any) int {
 	return got
 }
 
+func queryString(t *testing.T, db *sql.DB, query string, args ...any) string {
+	t.Helper()
+
+	var got string
+	require.NoError(t, db.QueryRow(query, args...).Scan(&got))
+	return got
+}
+
 func recordRequest(store *AuditStore, apiKey, model, reqPath string, inputTokens, outputTokens, cachedTokens int, captureData []byte, fingerprint string) {
 	store.RecordRequest(0, apiKey, "TestUser", model, reqPath, 200, inputTokens, outputTokens, cachedTokens, 123, 45.6, 7.8, captureData, fingerprint, "")
 }
@@ -76,7 +84,7 @@ func TestAuditStore_NewStore(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "audit.db")
 
-	store, err := NewAuditStore(dbPath, 0, 10, 1, nil)
+	store, err := NewAuditStore(dbPath, 0, 0, 10, 1, nil)
 	require.NoError(t, err)
 	defer store.Close()
 
@@ -89,7 +97,7 @@ func TestAuditStore_NewStore(t *testing.T) {
 func TestAuditStore_NewStore_CreatesDirectory(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "nested", "audit", "audit.db")
 
-	store, err := NewAuditStore(dbPath, 0, 10, 1, nil)
+	store, err := NewAuditStore(dbPath, 0, 0, 10, 1, nil)
 	require.NoError(t, err)
 	defer store.Close()
 
@@ -99,11 +107,11 @@ func TestAuditStore_NewStore_CreatesDirectory(t *testing.T) {
 func TestAuditStore_DoubleOpen(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "audit.db")
 
-	store1, err := NewAuditStore(dbPath, 0, 10, 1, nil)
+	store1, err := NewAuditStore(dbPath, 0, 0, 10, 1, nil)
 	require.NoError(t, err)
 	defer store1.Close()
 
-	store2, err := NewAuditStore(dbPath, 0, 10, 1, nil)
+	store2, err := NewAuditStore(dbPath, 0, 0, 10, 1, nil)
 	require.NoError(t, err)
 	defer store2.Close()
 
@@ -396,6 +404,82 @@ func TestAuditStore_RetentionCleanup(t *testing.T) {
 	assert.Equal(t, 0, queryInt(t, enabledStore.db, `SELECT COUNT(*) FROM request_log`))
 	assert.Equal(t, 0, queryInt(t, enabledStore.db, `SELECT COUNT(*) FROM sessions`))
 	assert.Equal(t, 0, queryInt(t, enabledStore.db, `SELECT COUNT(*) FROM users`))
+}
+
+func TestAuditStore_CapturePurge(t *testing.T) {
+	store, _ := newTestAuditStore(t, 0, 1)
+	defer closeStore(t, store)
+
+	// Insert old capture data
+	oldTime := time.Now().UTC().AddDate(0, 0, -8).Format("2006-01-02T15:04:05.000Z")
+	recentTime := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+
+	// Create user
+	result, err := store.db.Exec(`INSERT INTO users (api_key, created_at) VALUES (?, ?)`, "purge-key", oldTime)
+	require.NoError(t, err)
+	userID, _ := result.LastInsertId()
+
+	// Old request log (should survive — purge only removes captures, not request_log)
+	result, err = store.db.Exec(`
+		INSERT INTO request_log (user_id, model, req_path, status_code, input_tokens, output_tokens, cached_tokens, duration_ms, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, userID, "old-model", "/v1/chat/completions", 200, 100, 200, 50, 50, oldTime)
+	require.NoError(t, err)
+	oldRequestLogID, _ := result.LastInsertId()
+
+	// Recent request log
+	result, err = store.db.Exec(`
+		INSERT INTO request_log (user_id, model, req_path, status_code, input_tokens, output_tokens, cached_tokens, duration_ms, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, userID, "recent-model", "/v1/chat/completions", 200, 10, 20, 5, 30, recentTime)
+	require.NoError(t, err)
+	recentRequestLogID, _ := result.LastInsertId()
+
+	// Old session + old capture
+	result, err = store.db.Exec(`
+		INSERT INTO sessions (user_id, model, fingerprint, req_path, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, userID, "old-model", "old-fp", "/v1/chat/completions", oldTime, oldTime)
+	require.NoError(t, err)
+	oldSessionID, _ := result.LastInsertId()
+	_, err = store.db.Exec(`
+		INSERT INTO captures (session_id, request_log_id, seq_num, data, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, oldSessionID, oldRequestLogID, 1, []byte(`old-capture-blob`), oldTime)
+	require.NoError(t, err)
+
+	// Recent session + recent capture
+	result, err = store.db.Exec(`
+		INSERT INTO sessions (user_id, model, fingerprint, req_path, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, userID, "recent-model", "recent-fp", "/v1/chat/completions", recentTime, recentTime)
+	require.NoError(t, err)
+	recentSessionID, _ := result.LastInsertId()
+	_, err = store.db.Exec(`
+		INSERT INTO captures (session_id, request_log_id, seq_num, data, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, recentSessionID, recentRequestLogID, 1, []byte(`recent-capture-blob`), recentTime)
+	require.NoError(t, err)
+
+	// Before purge: 2 captures, 2 sessions, 2 request_log
+	assert.Equal(t, 2, queryInt(t, store.db, `SELECT COUNT(*) FROM captures`))
+	assert.Equal(t, 2, queryInt(t, store.db, `SELECT COUNT(*) FROM sessions`))
+	assert.Equal(t, 2, queryInt(t, store.db, `SELECT COUNT(*) FROM request_log`))
+
+	// Purge captures older than 7 days
+	store.capturePurgeDays = 7
+	require.NoError(t, store.purgeOldCaptures())
+
+	// Old capture deleted, recent capture preserved
+	assert.Equal(t, 1, queryInt(t, store.db, `SELECT COUNT(*) FROM captures`))
+	assert.Equal(t, []byte(`recent-capture-blob`), []byte(queryString(t, store.db, `SELECT data FROM captures`)))
+
+	// Old session cleaned up (orphaned), recent session preserved
+	assert.Equal(t, 1, queryInt(t, store.db, `SELECT COUNT(*) FROM sessions`))
+
+	// ALL request_log rows preserved (this is the key point: metadata survives)
+	assert.Equal(t, 2, queryInt(t, store.db, `SELECT COUNT(*) FROM request_log`))
+	assert.Equal(t, 100, queryInt(t, store.db, `SELECT input_tokens FROM request_log WHERE model = 'old-model'`))
 }
 
 func insertOldAuditRows(t *testing.T, db *sql.DB) {

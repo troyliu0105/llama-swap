@@ -517,7 +517,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":20,"input
 
 func TestMetricsMonitor_RecordAudit_CodexAccountFromContext(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "audit.db")
-	store, err := audit.NewAuditStore(dbPath, 0, 1, 1, nil)
+	store, err := audit.NewAuditStore(dbPath, 0, 0, 1, 1, nil)
 	require.NoError(t, err)
 
 	mm := newMetricsMonitor(testLogger, 10, 0, nil)

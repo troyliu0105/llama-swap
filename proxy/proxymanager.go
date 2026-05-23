@@ -222,6 +222,7 @@ func New(proxyConfig config.Config) *ProxyManager {
 		auditStore, err := audit.NewAuditStore(
 			proxyConfig.Audit.Database,
 			proxyConfig.Audit.RetentionDays,
+			proxyConfig.Audit.CapturePurgeDays,
 			proxyConfig.Audit.CaptureFlushSize,
 			proxyConfig.Audit.CaptureFlushInterval,
 			proxyLogger,

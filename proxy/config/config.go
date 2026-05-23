@@ -238,6 +238,7 @@ type AuditConfig struct {
 	Enabled              bool   `yaml:"enabled"`
 	Database             string `yaml:"database"`
 	RetentionDays        int    `yaml:"retentionDays"`
+	CapturePurgeDays     int    `yaml:"capturePurgeDays"`
 	CaptureFlushInterval int    `yaml:"captureFlushInterval"` // seconds
 	CaptureFlushSize     int    `yaml:"captureFlushSize"`
 }
