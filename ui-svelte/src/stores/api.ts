@@ -368,6 +368,17 @@ export async function fetchAuditCaptures(userId: number, limit: number = 50, off
   }
 }
 
+export async function fetchAuditModelUsage(period: string = "24h"): Promise<AuditModelUsage[]> {
+  try {
+    const response = await fetch(`/api/audit/models?period=${period}`);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Failed to fetch audit model usage:", error);
+    return [];
+  }
+}
+
 export async function fetchPerformance(after?: string): Promise<PerformanceResponse | null> {
   try {
     const url = after ? `/api/performance?after=${encodeURIComponent(after)}` : "/api/performance";

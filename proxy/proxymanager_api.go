@@ -47,6 +47,7 @@ func addApiHandlers(pm *ProxyManager) {
 			apiGroup.GET("/audit/usage/:user_id", pm.apiAuditUserUsage)
 			apiGroup.GET("/audit/captures", pm.apiAuditCaptures)
 			apiGroup.GET("/audit/activity", pm.apiAuditActivity)
+			apiGroup.GET("/audit/models", pm.apiAuditModelUsage)
 		}
 		apiGroup.GET("/codex/accounts", pm.apiCodexAccounts)
 		if pm.auditStore != nil {
@@ -681,6 +682,20 @@ func (pm *ProxyManager) apiAuditUsers(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, users)
+}
+
+func (pm *ProxyManager) apiAuditModelUsage(c *gin.Context) {
+	period := c.DefaultQuery("period", "24h")
+	if period != "24h" && period != "7d" && period != "30d" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "period must be one of: 24h, 7d, 30d"})
+		return
+	}
+	entries, err := pm.auditStore.GetModelUsageOverview(period)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get model usage overview"})
+		return
+	}
+	c.JSON(http.StatusOK, entries)
 }
 
 func (pm *ProxyManager) apiAuditActivity(c *gin.Context) {

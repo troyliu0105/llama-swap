@@ -423,6 +423,39 @@ type ActivityEntry struct {
 	} `json:"tokens"`
 }
 
+func (s *AuditStore) GetModelUsageOverview(period string) ([]ModelUsageEntry, error) {
+	since := periodSince(period)
+	rows, err := s.db.Query(`
+		SELECT model,
+			COALESCE(SUM(input_tokens), 0),
+			COALESCE(SUM(output_tokens), 0),
+			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN cached_tokens ELSE 0 END), 0),
+			COUNT(*)
+		FROM request_log
+		WHERE created_at >= ?
+		GROUP BY model
+		ORDER BY COUNT(*) DESC
+	`, since)
+	if err != nil {
+		return nil, fmt.Errorf("get model usage overview: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]ModelUsageEntry, 0)
+	for rows.Next() {
+		var entry ModelUsageEntry
+		if err := rows.Scan(&entry.Model, &entry.InputTokens, &entry.OutputTokens, &entry.CachedTokens, &entry.RequestCount); err != nil {
+			return nil, fmt.Errorf("scan model usage overview: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate model usage overview: %w", err)
+	}
+
+	return entries, nil
+}
+
 func (s *AuditStore) GetRecentActivity(limit int) ([]ActivityEntry, error) {
 	if limit <= 0 {
 		limit = 100
