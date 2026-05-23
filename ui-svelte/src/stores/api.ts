@@ -109,7 +109,7 @@ export function enableAPIEvents(enabled: boolean): void {
             break;
           }
           case "codexQuota": {
-            let route: string;
+            let route: string | undefined;
             currentRoute.subscribe((r) => (route = r))();
             if (route !== "/codex") break;
             fetchCodexAccounts().then((accounts) => {

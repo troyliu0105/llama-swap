@@ -12,6 +12,7 @@
     type AuditCaptureInfo,
   } from "../stores/api";
   import { sumTokenTotals, sumTokenTotalsWithRequests } from "../lib/tokenTotals";
+  import { type SortState, toggleSort, sortBy, sortIndicator } from "../lib/tableSort";
 
   type Tab = "users" | "models";
 
@@ -34,6 +35,14 @@
   const capturesLimit = 20;
   let capturesHasMore = $state(false);
 
+  // Sort state for each table
+  type UsageSortKey = "name" | "api_key" | "input_tokens" | "output_tokens" | "cached_tokens" | "all" | "total_requests";
+  type ModelSortKey = "model" | "input_tokens" | "output_tokens" | "cached_tokens" | "all" | "request_count";
+
+  let usageSort = $state<SortState<UsageSortKey>>({ key: "name", dir: "desc" });
+  let userModelSort = $state<SortState<ModelSortKey>>({ key: "model", dir: "desc" });
+  let modelSort = $state<SortState<ModelSortKey>>({ key: "model", dir: "desc" });
+
   function maskApiKey(key: string): string {
     if (key.length <= 8) return key;
     return key.slice(0, 4) + "..." + key.slice(-4);
@@ -48,6 +57,36 @@
     const date = new Date(ts);
     return date.toLocaleString();
   }
+
+  function usageAccessor(entry: AuditUsageEntry, key: string): string | number {
+    const user = users.find((u) => u.id === entry.user_id);
+    switch (key) {
+      case "name": return entry.name || "";
+      case "api_key": return user ? user.api_key : "";
+      case "input_tokens": return entry.input_tokens;
+      case "output_tokens": return entry.output_tokens;
+      case "cached_tokens": return entry.cached_tokens;
+      case "all": return entry.input_tokens + entry.output_tokens;
+      case "total_requests": return user ? user.total_requests : 0;
+      default: return 0;
+    }
+  }
+
+  function modelUsageAccessor(mu: AuditModelUsage, key: string): string | number {
+    switch (key) {
+      case "model": return mu.model;
+      case "input_tokens": return mu.input_tokens;
+      case "output_tokens": return mu.output_tokens;
+      case "cached_tokens": return mu.cached_tokens;
+      case "all": return mu.input_tokens + mu.output_tokens;
+      case "request_count": return mu.request_count;
+      default: return 0;
+    }
+  }
+
+  let sortedUsage = $derived(sortBy(usage, usageSort, usageAccessor));
+  let sortedUserModelUsage = $derived(sortBy(userModelUsage, userModelSort, modelUsageAccessor));
+  let sortedModelUsage = $derived(sortBy(modelUsage, modelSort, modelUsageAccessor));
 
   async function loadData() {
     loading = true;
@@ -191,23 +230,24 @@
         <table class="min-w-full divide-y">
           <thead class="border-gray-200 dark:border-white/10">
             <tr class="text-left text-xs uppercase tracking-wider">
-              <th class="px-6 py-3">Name</th>
-              <th class="px-6 py-3">API Key</th>
-              <th class="px-6 py-3">Input Tokens</th>
-              <th class="px-6 py-3">Output Tokens</th>
-              <th class="px-6 py-3">Cached Tokens</th>
-              <th class="px-6 py-3">Total Requests</th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => usageSort = toggleSort(usageSort, "name")}>Name{sortIndicator(usageSort, "name")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => usageSort = toggleSort(usageSort, "api_key")}>API Key{sortIndicator(usageSort, "api_key")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => usageSort = toggleSort(usageSort, "input_tokens")}>Input Tokens{sortIndicator(usageSort, "input_tokens")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => usageSort = toggleSort(usageSort, "output_tokens")}>Output Tokens{sortIndicator(usageSort, "output_tokens")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => usageSort = toggleSort(usageSort, "cached_tokens")}>Cached Tokens{sortIndicator(usageSort, "cached_tokens")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => usageSort = toggleSort(usageSort, "all")}>All{sortIndicator(usageSort, "all")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => usageSort = toggleSort(usageSort, "total_requests")}>Total Requests{sortIndicator(usageSort, "total_requests")}</button></th>
             </tr>
           </thead>
           <tbody class="divide-y">
             {#if usage.length === 0}
               <tr>
-                <td colspan={6} class="px-6 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
+                <td colspan={7} class="px-6 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
                   No usage data for this period
                 </td>
               </tr>
             {:else}
-              {#each usage as entry (entry.user_id)}
+              {#each sortedUsage as entry (entry.user_id)}
                 {@const user = users.find((u) => u.id === entry.user_id)}
                 <tr
                   class="whitespace-nowrap text-sm border-gray-200 dark:border-white/10 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
@@ -220,6 +260,7 @@
                   <td class="px-6 py-4">{formatNumber(entry.input_tokens)}</td>
                   <td class="px-6 py-4">{formatNumber(entry.output_tokens)}</td>
                   <td class="px-6 py-4">{formatNumber(entry.cached_tokens)}</td>
+                  <td class="px-6 py-4">{formatNumber(entry.input_tokens + entry.output_tokens)}</td>
                   <td class="px-6 py-4">{user ? formatNumber(user.total_requests) : "-"}</td>
                 </tr>
               {/each}
@@ -229,12 +270,8 @@
                 <td class="px-6 py-4">{formatNumber(usageTotals.input_tokens)}</td>
                 <td class="px-6 py-4">{formatNumber(usageTotals.output_tokens)}</td>
                 <td class="px-6 py-4">{formatNumber(usageTotals.cached_tokens)}</td>
+                <td class="px-6 py-4">{formatNumber(usageTotals.input_plus_output)}</td>
                 <td class="px-6 py-4">{formatNumber(usageTotalRequests)}</td>
-              </tr>
-              <tr class="whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                <td class="px-6 py-2" colspan="2"></td>
-                <td class="px-6 py-2 text-xs">Input + Output: {formatNumber(usageTotals.input_plus_output)}</td>
-                <td class="px-6 py-2" colspan="3"></td>
               </tr>
             {/if}
           </tbody>
@@ -263,20 +300,22 @@
             <table class="min-w-full divide-y">
               <thead class="border-gray-200 dark:border-white/10">
                 <tr class="text-left text-xs uppercase tracking-wider">
-                  <th class="px-6 py-3">Model</th>
-                  <th class="px-6 py-3">Input Tokens</th>
-                  <th class="px-6 py-3">Output Tokens</th>
-                  <th class="px-6 py-3">Cached Tokens</th>
-                  <th class="px-6 py-3">Requests</th>
+                  <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => userModelSort = toggleSort(userModelSort, "model")}>Model{sortIndicator(userModelSort, "model")}</button></th>
+                  <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => userModelSort = toggleSort(userModelSort, "input_tokens")}>Input Tokens{sortIndicator(userModelSort, "input_tokens")}</button></th>
+                  <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => userModelSort = toggleSort(userModelSort, "output_tokens")}>Output Tokens{sortIndicator(userModelSort, "output_tokens")}</button></th>
+                  <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => userModelSort = toggleSort(userModelSort, "cached_tokens")}>Cached Tokens{sortIndicator(userModelSort, "cached_tokens")}</button></th>
+                  <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => userModelSort = toggleSort(userModelSort, "all")}>All{sortIndicator(userModelSort, "all")}</button></th>
+                  <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => userModelSort = toggleSort(userModelSort, "request_count")}>Requests{sortIndicator(userModelSort, "request_count")}</button></th>
                 </tr>
               </thead>
               <tbody class="divide-y">
-                {#each userModelUsage as mu (mu.model)}
+                {#each sortedUserModelUsage as mu (mu.model)}
                   <tr class="whitespace-nowrap text-sm border-gray-200 dark:border-white/10">
                     <td class="px-6 py-4">{mu.model}</td>
                     <td class="px-6 py-4">{formatNumber(mu.input_tokens)}</td>
                     <td class="px-6 py-4">{formatNumber(mu.output_tokens)}</td>
                     <td class="px-6 py-4">{formatNumber(mu.cached_tokens)}</td>
+                    <td class="px-6 py-4">{formatNumber(mu.input_tokens + mu.output_tokens)}</td>
                     <td class="px-6 py-4">{formatNumber(mu.request_count)}</td>
                   </tr>
                 {/each}
@@ -285,11 +324,8 @@
                   <td class="px-6 py-4">{formatNumber(userModelTotals.input_tokens)}</td>
                   <td class="px-6 py-4">{formatNumber(userModelTotals.output_tokens)}</td>
                   <td class="px-6 py-4">{formatNumber(userModelTotals.cached_tokens)}</td>
+                  <td class="px-6 py-4">{formatNumber(userModelTotals.input_plus_output)}</td>
                   <td class="px-6 py-4">{formatNumber(userModelTotals.request_count)}</td>
-                </tr>
-                <tr class="whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                  <td class="px-6 py-2 text-xs">Input + Output: {formatNumber(userModelTotals.input_plus_output)}</td>
-                  <td class="px-6 py-2" colspan="4"></td>
                 </tr>
               </tbody>
             </table>
@@ -346,27 +382,29 @@
         <table class="min-w-full divide-y">
           <thead class="border-gray-200 dark:border-white/10">
             <tr class="text-left text-xs uppercase tracking-wider">
-              <th class="px-6 py-3">Model</th>
-              <th class="px-6 py-3">Input Tokens</th>
-              <th class="px-6 py-3">Output Tokens</th>
-              <th class="px-6 py-3">Cached Tokens</th>
-              <th class="px-6 py-3">Requests</th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => modelSort = toggleSort(modelSort, "model")}>Model{sortIndicator(modelSort, "model")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => modelSort = toggleSort(modelSort, "input_tokens")}>Input Tokens{sortIndicator(modelSort, "input_tokens")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => modelSort = toggleSort(modelSort, "output_tokens")}>Output Tokens{sortIndicator(modelSort, "output_tokens")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => modelSort = toggleSort(modelSort, "cached_tokens")}>Cached Tokens{sortIndicator(modelSort, "cached_tokens")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => modelSort = toggleSort(modelSort, "all")}>All{sortIndicator(modelSort, "all")}</button></th>
+              <th class="px-6 py-3"><button class="cursor-pointer hover:text-gray-900 dark:hover:text-white" onclick={() => modelSort = toggleSort(modelSort, "request_count")}>Requests{sortIndicator(modelSort, "request_count")}</button></th>
             </tr>
           </thead>
           <tbody class="divide-y">
             {#if modelUsage.length === 0}
               <tr>
-                <td colspan={5} class="px-6 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
+                <td colspan={6} class="px-6 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
                   No model usage data for this period
                 </td>
               </tr>
             {:else}
-              {#each modelUsage as mu (mu.model)}
+              {#each sortedModelUsage as mu (mu.model)}
                 <tr class="whitespace-nowrap text-sm border-gray-200 dark:border-white/10">
                   <td class="px-6 py-4">{mu.model}</td>
                   <td class="px-6 py-4">{formatNumber(mu.input_tokens)}</td>
                   <td class="px-6 py-4">{formatNumber(mu.output_tokens)}</td>
                   <td class="px-6 py-4">{formatNumber(mu.cached_tokens)}</td>
+                  <td class="px-6 py-4">{formatNumber(mu.input_tokens + mu.output_tokens)}</td>
                   <td class="px-6 py-4">{formatNumber(mu.request_count)}</td>
                 </tr>
               {/each}
@@ -375,11 +413,8 @@
                 <td class="px-6 py-4">{formatNumber(modelTotals.input_tokens)}</td>
                 <td class="px-6 py-4">{formatNumber(modelTotals.output_tokens)}</td>
                 <td class="px-6 py-4">{formatNumber(modelTotals.cached_tokens)}</td>
+                <td class="px-6 py-4">{formatNumber(modelTotals.input_plus_output)}</td>
                 <td class="px-6 py-4">{formatNumber(modelTotals.request_count)}</td>
-              </tr>
-              <tr class="whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                <td class="px-6 py-2 text-xs">Input + Output: {formatNumber(modelTotals.input_plus_output)}</td>
-                <td class="px-6 py-2" colspan="4"></td>
               </tr>
             {/if}
           </tbody>
