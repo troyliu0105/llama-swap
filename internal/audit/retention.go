@@ -34,8 +34,10 @@ func (s *AuditStore) startRetention() {
 func (s *AuditStore) cleanExpired() error {
 	cutoff := time.Now().UTC().AddDate(0, 0, -s.retentionDays).Format("2006-01-02T15:04:05.000Z")
 
+	s.writeMu.Lock()
 	tx, err := s.db.Begin()
 	if err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("begin audit retention cleanup: %w", err)
 	}
 	defer func() {
@@ -45,17 +47,22 @@ func (s *AuditStore) cleanExpired() error {
 	}()
 
 	if _, err = tx.Exec(`DELETE FROM request_log WHERE created_at < ?`, cutoff); err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("delete expired request logs: %w", err)
 	}
 	if _, err = tx.Exec(`DELETE FROM sessions WHERE id NOT IN (SELECT session_id FROM captures)`); err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("delete orphaned sessions: %w", err)
 	}
 	if _, err = tx.Exec(`DELETE FROM users WHERE id NOT IN (SELECT user_id FROM request_log)`); err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("delete orphaned users: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("commit audit retention cleanup: %w", err)
 	}
+	s.writeMu.Unlock()
 
 	return nil
 }
@@ -89,8 +96,10 @@ func (s *AuditStore) startCapturePurge() {
 func (s *AuditStore) purgeOldCaptures() error {
 	cutoff := time.Now().UTC().AddDate(0, 0, -s.capturePurgeDays).Format("2006-01-02T15:04:05.000Z")
 
+	s.writeMu.Lock()
 	tx, err := s.db.Begin()
 	if err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("begin capture purge: %w", err)
 	}
 	defer func() {
@@ -101,17 +110,21 @@ func (s *AuditStore) purgeOldCaptures() error {
 
 	result, err := tx.Exec(`DELETE FROM captures WHERE created_at < ?`, cutoff)
 	if err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("delete old captures: %w", err)
 	}
 
 	// Clean up orphaned sessions (no captures left)
 	if _, err = tx.Exec(`DELETE FROM sessions WHERE id NOT IN (SELECT session_id FROM captures)`); err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("delete orphaned sessions after capture purge: %w", err)
 	}
 
 	if err = tx.Commit(); err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("commit capture purge: %w", err)
 	}
+	s.writeMu.Unlock()
 
 	if n, _ := result.RowsAffected(); n > 0 && s.logger != nil {
 		s.logger.Infof("audit db: purged %d old capture blobs older than %d days", n, s.capturePurgeDays)

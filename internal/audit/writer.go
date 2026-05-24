@@ -90,8 +90,10 @@ type requestLogResult struct {
 }
 
 func (s *AuditStore) flushRequestLogs(events []auditEvent) []captureBatchItem {
+	s.writeMu.Lock()
 	tx, err := s.db.Begin()
 	if err != nil {
+		s.writeMu.Unlock()
 		if s.logger != nil {
 			s.logger.Errorf("begin audit request log transaction: %v", err)
 		}
@@ -108,6 +110,7 @@ func (s *AuditStore) flushRequestLogs(events []auditEvent) []captureBatchItem {
 			userID, err = s.ensureUserTx(tx, event.apiKey, event.userName)
 			if err != nil {
 				_ = tx.Rollback()
+				s.writeMu.Unlock()
 				if s.logger != nil {
 					s.logger.Errorf("ensure audit user (event %d/%d): %v", i, len(events), err)
 				}
@@ -119,6 +122,7 @@ func (s *AuditStore) flushRequestLogs(events []auditEvent) []captureBatchItem {
 		requestLogID, err := s.insertRequestLogTx(tx, userID, event)
 		if err != nil {
 			_ = tx.Rollback()
+			s.writeMu.Unlock()
 			if s.logger != nil {
 				s.logger.Errorf("insert audit request log (event %d/%d): %v", i, len(events), err)
 			}
@@ -136,11 +140,13 @@ func (s *AuditStore) flushRequestLogs(events []auditEvent) []captureBatchItem {
 	}
 
 	if err := tx.Commit(); err != nil {
+		s.writeMu.Unlock()
 		if s.logger != nil {
 			s.logger.Errorf("commit audit request log transaction: %v", err)
 		}
 		return nil
 	}
+	s.writeMu.Unlock()
 
 	var captures []captureBatchItem
 	for _, r := range results {
@@ -199,8 +205,10 @@ func (s *AuditStore) insertRequestLogTx(tx *sql.Tx, userID int64, event auditEve
 }
 
 func (s *AuditStore) flushCaptures(items []captureBatchItem) error {
+	s.writeMu.Lock()
 	tx, err := s.db.Begin()
 	if err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("begin capture flush: %w", err)
 	}
 	defer func() {
@@ -213,6 +221,7 @@ func (s *AuditStore) flushCaptures(items []captureBatchItem) error {
 		sessionID, flushErr := upsertSession(tx, item)
 		if flushErr != nil {
 			err = flushErr
+			s.writeMu.Unlock()
 			return err
 		}
 
@@ -221,13 +230,16 @@ func (s *AuditStore) flushCaptures(items []captureBatchItem) error {
 			VALUES (?, ?, (SELECT COALESCE(MAX(seq_num), 0) + 1 FROM captures WHERE session_id = ?), ?)
 		`, sessionID, item.requestLogID, sessionID, item.captureData); flushErr != nil {
 			err = fmt.Errorf("insert capture: %w", flushErr)
+			s.writeMu.Unlock()
 			return err
 		}
 	}
 
 	if err = tx.Commit(); err != nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("commit capture flush: %w", err)
 	}
+	s.writeMu.Unlock()
 
 	return nil
 }

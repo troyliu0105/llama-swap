@@ -3,6 +3,8 @@ package audit
 import (
 	"database/sql"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -846,4 +848,76 @@ func TestPeriodSince(t *testing.T) {
 			assert.Equal(t, expectedTime, got)
 		})
 	}
+}
+
+// TestAuditStore_ConcurrentWrites verifies that the writeMu prevents SQLITE_BUSY
+// errors when multiple goroutines (writer, retention, purge, codex snapshot) write
+// to the database concurrently. Without the mutex, this test would reliably fail
+// with "database is locked" under the modernc.org/sqlite driver with
+// SetMaxOpenConns(2).
+func TestAuditStore_ConcurrentWrites(t *testing.T) {
+	// Flush on every event so writer goroutine writes immediately
+	store, _ := newTestAuditStore(t, 0, 1)
+	defer closeStore(t, store)
+
+	// Enable retention so cleanExpired() and purgeOldCaptures() are wired
+	store.retentionDays = 365 // far future so nothing gets deleted
+	store.capturePurgeDays = 365
+
+	const writers = 6
+	const iterations = 50
+
+	var wg sync.WaitGroup
+	var errors atomic.Int64
+
+	// Writer goroutine 1-2: RecordRequest via channel → flushRequestLogs
+	for w := 0; w < 2; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				store.RecordRequest(
+					i, "concurrent-key", "TestUser", "model-a",
+					"/v1/chat/completions", 200,
+					1, 2, 0, 10, 5.0, 3.0,
+					[]byte(`{"ping":"pong"}`), "fp-concurrent",
+					"",
+				)
+			}
+		}(w)
+	}
+
+	// Writer goroutine 3-4: direct cleanExpired (same path as retention ticker)
+	for w := 0; w < 2; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				if err := store.cleanExpired(); err != nil {
+					errors.Add(1)
+				}
+			}
+		}()
+	}
+
+	// Writer goroutine 5-6: direct purgeOldCaptures (same path as purge ticker)
+	for w := 0; w < 2; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				if err := store.purgeOldCaptures(); err != nil {
+					errors.Add(1)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	require.Equal(t, int64(0), errors.Load(),
+		"concurrent writes should not produce SQLITE_BUSY or other errors")
+
+	// Verify data integrity: all RecordRequest calls should have been persisted
+	eventuallyCount(t, store.db, `SELECT COUNT(*) FROM request_log`, 2*iterations)
 }

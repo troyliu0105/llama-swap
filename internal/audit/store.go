@@ -28,6 +28,7 @@ const (
 var migrationFiles embed.FS
 
 type AuditStore struct {
+	writeMu              sync.Mutex // serialises all write transactions to prevent SQLITE_BUSY
 	db                   *sql.DB
 	auditCh              chan auditEvent
 	logger               *logmon.Monitor

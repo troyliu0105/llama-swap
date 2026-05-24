@@ -366,6 +366,7 @@ func maskAPIKey(apiKey string) string {
 }
 
 func (s *AuditStore) SaveCodexQuotaSnapshot(accountName string, snapshotJSON []byte) error {
+	s.writeMu.Lock()
 	_, err := s.db.Exec(`
 		INSERT INTO codex_quota_snapshots (account_name, snapshot, updated_at)
 		VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -373,6 +374,7 @@ func (s *AuditStore) SaveCodexQuotaSnapshot(accountName string, snapshotJSON []b
 			snapshot = excluded.snapshot,
 			updated_at = CURRENT_TIMESTAMP
 	`, accountName, string(snapshotJSON))
+	s.writeMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("save codex quota snapshot for %q: %w", accountName, err)
 	}
