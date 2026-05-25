@@ -12,7 +12,7 @@
     type AuditCaptureInfo,
   } from "../stores/api";
   import { sumTokenTotals, sumTokenTotalsWithRequests } from "../lib/tokenTotals";
-  import { type SortState, toggleSort, sortBy, sortIndicator } from "../lib/tableSort";
+  import { type SortState, toggleSort, sortBy, sortIndicator, loadSortState, saveSortState } from "../lib/tableSort";
 
   type Tab = "users" | "models";
 
@@ -39,9 +39,13 @@
   type UsageSortKey = "name" | "api_key" | "input_tokens" | "output_tokens" | "cached_tokens" | "all" | "total_requests";
   type ModelSortKey = "model" | "input_tokens" | "output_tokens" | "cached_tokens" | "all" | "request_count";
 
-  let usageSort = $state<SortState<UsageSortKey>>({ key: "name", dir: "desc" });
-  let userModelSort = $state<SortState<ModelSortKey>>({ key: "model", dir: "desc" });
-  let modelSort = $state<SortState<ModelSortKey>>({ key: "model", dir: "desc" });
+  let usageSort = $state<SortState<UsageSortKey>>(loadSortState("audit-usage", "name"));
+  let userModelSort = $state<SortState<ModelSortKey>>(loadSortState("audit-user-model", "model"));
+  let modelSort = $state<SortState<ModelSortKey>>(loadSortState("audit-model", "model"));
+
+  $effect(() => { saveSortState("audit-usage", usageSort); });
+  $effect(() => { saveSortState("audit-user-model", userModelSort); });
+  $effect(() => { saveSortState("audit-model", modelSort); });
 
   function maskApiKey(key: string): string {
     if (key.length <= 8) return key;

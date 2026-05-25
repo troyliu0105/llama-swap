@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fetchCodexUserUsage, type CodexUsageEntry, type CodexUserUsageEntry } from "../stores/api";
   import { sumTokenTotalsWithRequests } from "../lib/tokenTotals";
-  import { type SortState, toggleSort, sortBy, sortIndicator } from "../lib/tableSort";
+  import { type SortState, toggleSort, sortBy, sortIndicator, loadSortState, saveSortState } from "../lib/tableSort";
 
   interface Props {
     usage: CodexUsageEntry[];
@@ -20,8 +20,11 @@
   type UsageSortKey = "name" | "codex_account" | "input_tokens" | "output_tokens" | "cached_tokens" | "all" | "request_count";
   type ModelSortKey = "model" | "input_tokens" | "output_tokens" | "cached_tokens" | "all" | "request_count";
 
-  let usageSort = $state<SortState<UsageSortKey>>({ key: "name", dir: "desc" });
-  let modelSort = $state<SortState<ModelSortKey>>({ key: "model", dir: "desc" });
+  let usageSort = $state<SortState<UsageSortKey>>(loadSortState("codex-usage", "name"));
+  let modelSort = $state<SortState<ModelSortKey>>(loadSortState("codex-model", "model"));
+
+  $effect(() => { saveSortState("codex-usage", usageSort); });
+  $effect(() => { saveSortState("codex-model", modelSort); });
 
   function formatNumber(n: number): string {
     return n.toLocaleString();

@@ -5,6 +5,41 @@ export interface SortState<K extends string = string> {
   dir: SortDir;
 }
 
+const SORT_STORAGE_PREFIX = "table-sort-";
+
+/**
+ * Load sort state from localStorage, falling back to defaults.
+ */
+export function loadSortState<K extends string>(
+  tableId: string,
+  defaultKey: K,
+  defaultDir: SortDir = "desc",
+): SortState<K> {
+  if (typeof window === "undefined") return { key: defaultKey, dir: defaultDir };
+  try {
+    const saved = localStorage.getItem(SORT_STORAGE_PREFIX + tableId);
+    if (saved) {
+      const parsed = JSON.parse(saved) as SortState<K>;
+      if (parsed.key && parsed.dir) return parsed;
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return { key: defaultKey, dir: defaultDir };
+}
+
+/**
+ * Save sort state to localStorage.
+ */
+export function saveSortState<K extends string>(tableId: string, state: SortState<K>): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(SORT_STORAGE_PREFIX + tableId, JSON.stringify(state));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 /**
  * Toggle sort: if same key, flip direction; otherwise set key with default dir.
  */
