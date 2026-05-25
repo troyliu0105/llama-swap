@@ -157,6 +157,22 @@ func (s *AuditStore) configureDB() error {
 		s.logger.Infof("audit db: configured PRAGMAs: %s", strings.Join(pragmas, ", "))
 	}
 
+	// Activate incremental auto-vacuum so that DELETE operations can shrink the file.
+	// For existing databases, a one-time VACUUM is needed to write the flag into the
+	// database file header. After that, PRAGMA incremental_vacuum reclaims freed pages.
+	var av int
+	if err := s.db.QueryRow("PRAGMA auto_vacuum").Scan(&av); err == nil && av != 2 {
+		if _, err := s.db.Exec("PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
+			return fmt.Errorf("set auto_vacuum=INCREMENTAL: %w", err)
+		}
+		if _, err := s.db.Exec("VACUUM"); err != nil {
+			return fmt.Errorf("vacuum to activate auto_vacuum: %w", err)
+		}
+		if s.logger != nil {
+			s.logger.Infof("audit db: activated incremental auto-vacuum (one-time rebuild)")
+		}
+	}
+
 	return nil
 }
 

@@ -62,6 +62,10 @@ func (s *AuditStore) cleanExpired() error {
 		s.writeMu.Unlock()
 		return fmt.Errorf("commit audit retention cleanup: %w", err)
 	}
+
+	// Reclaim freed disk pages from expired records while still holding
+	// the write lock to avoid competing for the limited connection pool.
+	s.db.Exec("PRAGMA incremental_vacuum")
 	s.writeMu.Unlock()
 
 	return nil
@@ -124,11 +128,17 @@ func (s *AuditStore) purgeOldCaptures() error {
 		s.writeMu.Unlock()
 		return fmt.Errorf("commit capture purge: %w", err)
 	}
-	s.writeMu.Unlock()
 
-	if n, _ := result.RowsAffected(); n > 0 && s.logger != nil {
-		s.logger.Infof("audit db: purged %d old capture blobs older than %d days", n, s.capturePurgeDays)
+	if n, _ := result.RowsAffected(); n > 0 {
+		// Reclaim freed disk pages while still holding the write lock
+		// to avoid competing for the limited connection pool.
+		s.db.Exec("PRAGMA incremental_vacuum")
+		if s.logger != nil {
+			s.logger.Infof("audit db: purged %d old capture blobs older than %d days", n, s.capturePurgeDays)
+		}
 	}
+
+	s.writeMu.Unlock()
 
 	return nil
 }
