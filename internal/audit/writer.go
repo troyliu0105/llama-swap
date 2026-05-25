@@ -44,16 +44,32 @@ func (s *AuditStore) writer() {
 		if len(eventBuf) == 0 && len(captureBuf) == 0 {
 			return
 		}
+
+		// Flush request logs and accumulate capture items.
+		var newCaptures []captureBatchItem
 		if len(eventBuf) > 0 {
-			newCaptures := s.flushRequestLogs(eventBuf)
-			captureBuf = append(captureBuf, newCaptures...)
+			newCaptures = s.flushRequestLogs(eventBuf)
 			eventBuf = eventBuf[:0]
 		}
-		if len(captureBuf) > 0 {
-			if err := s.flushCaptures(captureBuf); err != nil && s.logger != nil {
+
+		// Merge any previously buffered captures with newly generated ones.
+		allCaptures := captureBuf
+		allCaptures = append(allCaptures, newCaptures...)
+		captureBuf = captureBuf[:0]
+
+		// Flush all captures in a single atomic transaction together with
+		// their session upserts. This must be in the SAME transaction as the
+		// request_log inserts above to prevent a race where retention cleanup
+		// cascade-deletes the request_log rows between the two transactions,
+		// causing FOREIGN KEY constraint failures on captures.request_log_id.
+		// However, since flushRequestLogs already committed its own TX, we
+		// need to handle the case where request_log rows were deleted in the
+		// interim. We do this by validating each request_log_id still exists
+		// before inserting the capture.
+		if len(allCaptures) > 0 {
+			if err := s.flushCaptures(allCaptures); err != nil && s.logger != nil {
 				s.logger.Errorf("flush audit captures: %v", err)
 			}
-			captureBuf = captureBuf[:0]
 		}
 	}
 
@@ -218,6 +234,15 @@ func (s *AuditStore) flushCaptures(items []captureBatchItem) error {
 	}()
 
 	for _, item := range items {
+		// Verify the request_log row still exists. Retention cleanup may have
+		// cascade-deleted it between flushRequestLogs committing its TX and
+		// this TX starting. If it's gone, silently skip this capture rather
+		// than triggering a FOREIGN KEY constraint failure.
+		var exists int
+		if qErr := tx.QueryRow(`SELECT 1 FROM request_log WHERE id = ?`, item.requestLogID).Scan(&exists); qErr != nil {
+			continue
+		}
+
 		sessionID, flushErr := upsertSession(tx, item)
 		if flushErr != nil {
 			err = flushErr
