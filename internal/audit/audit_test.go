@@ -845,7 +845,10 @@ func TestPeriodSince(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := periodSince(tt.period)
 			expectedTime := now.Add(-tt.wantDuration).Format("2006-01-02T15:04:05.000Z")
-			assert.Equal(t, expectedTime, got)
+			// Compare at second granularity to avoid flaky failures from the
+			// time gap between the test's time.Now() and periodSince's internal
+			// time.Now() call.
+			assert.Equal(t, expectedTime[:19], got[:19])
 		})
 	}
 }

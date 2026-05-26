@@ -37,6 +37,44 @@ func newTestProxy(t *testing.T, accountNames []string) *Proxy {
 	}
 }
 
+func TestProxy_NewProxy_RequiresAuthStore(t *testing.T) {
+	proxy, err := NewProxy(
+		"test-peer",
+		nil,
+		[]string{"acct1"},
+		"round-robin",
+		30*time.Second,
+		func(format string, args ...any) {},
+	)
+
+	assert.Nil(t, proxy)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "auth store must not be nil")
+}
+
+func TestProxy_NewProxy_UsesProvidedAuthStore(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAuthStore(filepath.Join(dir, "codex-auth.json"))
+	require.NoError(t, store.SetToken("acct1", &TokenData{
+		AccessToken:  "tok-acct1",
+		RefreshToken: "refresh-acct1",
+		ExpiresAt:    time.Now().Add(24 * time.Hour).Unix(),
+	}))
+
+	proxy, err := NewProxy(
+		"test-peer",
+		store,
+		[]string{"acct1"},
+		"round-robin",
+		30*time.Second,
+		func(format string, args ...any) {},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, proxy)
+	require.Same(t, store, proxy.auth)
+}
+
 func TestProxy_PrepareRequest_URLRewrite(t *testing.T) {
 	p := newTestProxy(t, []string{"acct1"})
 

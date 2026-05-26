@@ -245,6 +245,36 @@ func (s *AuthStore) ListAccounts() []string {
 	return names
 }
 
+// TokenExpiry holds a snapshot of an account's token expiry time.
+type TokenExpiry struct {
+	AccountName string
+	ExpiresAt   int64
+}
+
+// ListTokenExpiries returns a snapshot of all account names with their token
+// expiry times. The snapshot is taken under RLock and does not perform any
+// refresh or disk I/O. Accounts with nil tokens or empty refresh tokens are
+// skipped. Results are sorted by account name for deterministic behavior.
+func (s *AuthStore) ListTokenExpiries() []TokenExpiry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	expiries := make([]TokenExpiry, 0, len(s.tokens))
+	for accountName, token := range s.tokens {
+		if token == nil || token.RefreshToken == "" {
+			continue
+		}
+		expiries = append(expiries, TokenExpiry{
+			AccountName: accountName,
+			ExpiresAt:   token.ExpiresAt,
+		})
+	}
+	sort.Slice(expiries, func(i, j int) bool {
+		return expiries[i].AccountName < expiries[j].AccountName
+	})
+	return expiries
+}
+
 func (s *AuthStore) RemoveToken(accountName string) error {
 	// Hold the per-account refresh mutex to prevent a concurrent refresh
 	// from writing back the token after deletion (no "token resurrection").

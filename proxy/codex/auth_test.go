@@ -87,6 +87,61 @@ func TestAuthStore_ListAccounts(t *testing.T) {
 	assert.Equal(t, []string{"alpha", "bravo", "charlie"}, accounts)
 }
 
+func TestAuthStore_ListTokenExpiries_Empty(t *testing.T) {
+	store := newTestAuthStore(t)
+
+	assert.Empty(t, store.ListTokenExpiries())
+}
+
+func TestAuthStore_ListTokenExpiries_Multiple(t *testing.T) {
+	store := newTestAuthStore(t)
+
+	require.NoError(t, store.SetToken("charlie", &TokenData{RefreshToken: "refresh-charlie", ExpiresAt: 3000}))
+	require.NoError(t, store.SetToken("alpha", &TokenData{RefreshToken: "refresh-alpha", ExpiresAt: 1000}))
+	require.NoError(t, store.SetToken("bravo", &TokenData{RefreshToken: "refresh-bravo", ExpiresAt: 2000}))
+
+	expiries := store.ListTokenExpiries()
+	assert.Equal(t, []TokenExpiry{
+		{AccountName: "alpha", ExpiresAt: 1000},
+		{AccountName: "bravo", ExpiresAt: 2000},
+		{AccountName: "charlie", ExpiresAt: 3000},
+	}, expiries)
+}
+
+func TestAuthStore_ListTokenExpiries_SkipsNilToken(t *testing.T) {
+	store := newTestAuthStore(t)
+
+	require.NoError(t, store.SetToken("good_acct", &TokenData{RefreshToken: "refresh-good", ExpiresAt: 1000}))
+	store.mu.Lock()
+	store.tokens["bad_acct"] = nil
+	store.mu.Unlock()
+
+	expiries := store.ListTokenExpiries()
+	assert.Equal(t, []TokenExpiry{{AccountName: "good_acct", ExpiresAt: 1000}}, expiries)
+}
+
+func TestAuthStore_ListTokenExpiries_SkipsEmptyRefreshToken(t *testing.T) {
+	store := newTestAuthStore(t)
+
+	require.NoError(t, store.SetToken("empty_refresh", &TokenData{ExpiresAt: 1000}))
+	require.NoError(t, store.SetToken("good_acct", &TokenData{RefreshToken: "refresh-good", ExpiresAt: 2000}))
+
+	expiries := store.ListTokenExpiries()
+	assert.Equal(t, []TokenExpiry{{AccountName: "good_acct", ExpiresAt: 2000}}, expiries)
+}
+
+func TestAuthStore_ListTokenExpiries_SnapshotIsolation(t *testing.T) {
+	store := newTestAuthStore(t)
+
+	require.NoError(t, store.SetToken("acct1", &TokenData{RefreshToken: "refresh-1", ExpiresAt: 1000}))
+
+	expiries := store.ListTokenExpiries()
+	require.Len(t, expiries, 1)
+	expiries[0] = TokenExpiry{AccountName: "mutated", ExpiresAt: 9999}
+
+	assert.Equal(t, []TokenExpiry{{AccountName: "acct1", ExpiresAt: 1000}}, store.ListTokenExpiries())
+}
+
 func TestAuthStore_GetValidToken_NotExpired(t *testing.T) {
 	store := newTestAuthStore(t)
 

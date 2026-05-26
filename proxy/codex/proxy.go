@@ -32,21 +32,20 @@ type Proxy struct {
 
 func NewProxy(
 	peerID string,
-	authPath string,
+	auth *AuthStore,
 	accountNames []string,
 	strategy string,
 	timeout time.Duration,
 	logger func(format string, args ...any),
 ) (*Proxy, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("codex proxy: auth store must not be nil")
+	}
+
 	if logger == nil {
 		logger = func(format string, args ...any) {
 			fmt.Printf(format, args...)
 		}
-	}
-
-	auth := NewAuthStore(authPath)
-	if err := auth.Load(); err != nil {
-		return nil, fmt.Errorf("codex proxy: failed to load auth store: %w", err)
 	}
 
 	balancer := NewBalancer(accountNames, strategy)

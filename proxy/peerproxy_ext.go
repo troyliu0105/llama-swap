@@ -132,6 +132,9 @@ type EnhancedPeerProxy struct {
 	proxyMap         map[string]*enhancedPeerMember
 	prefixedModels   map[string]bool
 	prefixPeerModels bool
+
+	codexAuth      *codex.AuthStore
+	codexRefresher *codex.Refresher
 }
 
 // NewEnhancedPeerProxy creates a new EnhancedPeerProxy with the given configuration
@@ -145,6 +148,8 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 		peerIDs = append(peerIDs, peerID)
 	}
 	sort.Strings(peerIDs)
+
+	var sharedCodexAuth *codex.AuthStore
 
 	for _, peerID := range peerIDs {
 		peer := peers[peerID]
@@ -189,10 +194,16 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 				accountNames[i] = acct.Name
 			}
 			strategy := peer.Codex.LoadBalance.Strategy
+			if sharedCodexAuth == nil {
+				sharedCodexAuth = codex.NewAuthStore(codex.DefaultAuthPath())
+				if err := sharedCodexAuth.Load(); err != nil {
+					return nil, fmt.Errorf("failed to load codex auth store: %w", err)
+				}
+			}
 
 			codexProxy, err := codex.NewProxy(
 				peerID,
-				codex.DefaultAuthPath(),
+				sharedCodexAuth,
 				accountNames,
 				strategy,
 				peerTimeout,
@@ -400,11 +411,23 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 		}
 	}
 
+	// Start proactive token refresh if we have codex peers
+	var refresher *codex.Refresher
+	if sharedCodexAuth != nil {
+		refresher = codex.NewRefresher(sharedCodexAuth, func(format string, args ...any) {
+			proxyLogger.Infof(format, args...)
+		})
+		refresher.Start()
+		proxyLogger.Infof("started codex auth token refresher")
+	}
+
 	return &EnhancedPeerProxy{
 		peers:            peers,
 		proxyMap:         proxyMap,
 		prefixedModels:   prefixedModels,
 		prefixPeerModels: prefixPeerModels,
+		codexAuth:        sharedCodexAuth,
+		codexRefresher:   refresher,
 	}, nil
 }
 
@@ -463,6 +486,12 @@ func (p *EnhancedPeerProxy) GetOriginalModelName(modelID string) string {
 }
 
 func (p *EnhancedPeerProxy) Shutdown() {
+	// Stop the proactive token refresher first to prevent
+	// it from writing back tokens after accounts are deleted.
+	if p.codexRefresher != nil {
+		p.codexRefresher.Stop()
+	}
+
 	seen := make(map[*enhancedPeerMember]struct{})
 	for _, pp := range p.proxyMap {
 		if _, ok := seen[pp]; ok {

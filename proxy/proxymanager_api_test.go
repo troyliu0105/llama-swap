@@ -71,9 +71,11 @@ models:
 
 func TestCollectCodexAccounts_WithProxy(t *testing.T) {
 	authPath := t.TempDir() + "/nonexistent-auth.json"
+	authStore := codex.NewAuthStore(authPath)
+	require.NoError(t, authStore.Load())
 	codexProxy, err := codex.NewProxy(
 		"test-peer",
-		authPath,
+		authStore,
 		[]string{"account1", "account2"},
 		"round-robin",
 		30*time.Second,
@@ -112,10 +114,12 @@ func TestCollectCodexAccounts_WithAuthAndQuota(t *testing.T) {
 	authJSON, err := json.Marshal(authData)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(authPath, authJSON, 0644))
+	authStore := codex.NewAuthStore(authPath)
+	require.NoError(t, authStore.Load())
 
 	codexProxy, err := codex.NewProxy(
 		"test-peer",
-		authPath,
+		authStore,
 		[]string{"account1"},
 		"round-robin",
 		30*time.Second,
