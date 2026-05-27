@@ -33,6 +33,11 @@ type ExtendedPeerConfig struct {
 	// Peer type: "" (default) or "codex"
 	Type  string       `yaml:"type"`
 	Codex *CodexConfig `yaml:"codex"`
+
+	// UpstreamFormat specifies the wire format the upstream server expects.
+	// Values: "openai" (default), "responses", "anthropic".
+	// When set, incoming requests in a different format are auto-converted.
+	UpstreamFormat string `yaml:"upstreamFormat"`
 }
 
 func (c *ExtendedPeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {

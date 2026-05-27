@@ -9,3 +9,4 @@ dist/
 openspec/
 .sisyphus/
 .omo/
+.omp/

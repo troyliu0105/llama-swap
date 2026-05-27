@@ -19,6 +19,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/proxy/codex"
 	"github.com/mostlygeek/llama-swap/proxy/config"
+	"github.com/mostlygeek/llama-swap/proxy/protocol"
 )
 
 type peerCtxKey struct{}
@@ -124,6 +125,11 @@ type enhancedPeerMember struct {
 	// On failure it grows exponentially (capped at requestInterval).
 	// On success it decays back toward 0.
 	currentInterval time.Duration
+
+	// upstreamFormat is the wire protocol the upstream server expects.
+	// Only used when convertProtocol is true.
+	upstreamFormat   protocol.Format
+	convertProtocol  bool
 }
 
 // EnhancedPeerProxy manages proxying requests to remote peer servers with extended features
@@ -186,6 +192,8 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			queueTimeout:    peer.QueueTimeout,
 			requestInterval: peer.RequestInterval,
 			logger:          proxyLogger,
+			upstreamFormat:  protocol.ParseFormat(peer.UpstreamFormat),
+			convertProtocol: peer.UpstreamFormat != "",
 		}
 
 		if peer.Type == "codex" && peer.Codex != nil {
@@ -528,6 +536,58 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 
 	peerLog("[PEER] ▶ %s | %s | %s %s | %s\n", modelID, getPeerReqID(request), request.Method, request.URL.Path, pp.peerID)
 
+	// Protocol conversion: detect client format and convert if needed
+	if pp.convertProtocol && pp.upstreamFormat != protocol.FormatUnknown {
+		clientFormat := protocol.DetectClientFormat(request.URL.Path)
+		if protocol.NeedsConversion(clientFormat, pp.upstreamFormat) {
+			converter, err := protocol.NewConverter(clientFormat, pp.upstreamFormat)
+			if err != nil {
+				peerLog("[PEER ERROR] %s | %s | protocol_convert_error | %s\n",
+					getPeerReqID(request), modelID, err)
+				http.Error(writer, fmt.Sprintf("protocol conversion error: %v", err), http.StatusInternalServerError)
+				return nil
+			}
+
+			// Read and convert request body
+			bodyBytes, err := io.ReadAll(request.Body)
+			if err != nil {
+				http.Error(writer, "failed to read request body for conversion", http.StatusBadRequest)
+				return nil
+			}
+			request.Body.Close()
+
+			newBody, newPath, err := converter.ConvertRequest(bodyBytes, request.URL.Path)
+			if err != nil {
+				peerLog("[PEER ERROR] %s | %s | request_convert_error | %s\n",
+					getPeerReqID(request), modelID, err)
+				http.Error(writer, fmt.Sprintf("request conversion error: %v", err), http.StatusBadRequest)
+				return nil
+			}
+
+			request.Body = io.NopCloser(bytes.NewReader(newBody))
+			request.ContentLength = int64(len(newBody))
+			request.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBody)))
+
+			// If stripV1Prefix is set, the rewrite will strip the prefix later.
+			// Apply the path rewrite here first, then let stripV1Prefix do its thing.
+			if !pp.stripV1Prefix {
+				request.URL.Path = newPath
+			} else {
+				// Rewrite to the target format path, then strip /v1
+				request.URL.Path = strings.TrimPrefix(newPath, "/v1")
+				if request.URL.Path == "" {
+					request.URL.Path = "/"
+				}
+			}
+
+			// Wrap the response writer for response conversion
+			convertingWriter := protocol.NewTransformingWriter(writer, converter)
+			writer = convertingWriter
+
+			peerLog("[PEER] ▶ %s | %s | convert %s→%s | %s\n",
+				modelID, getPeerReqID(request), clientFormat, pp.upstreamFormat, pp.peerID)
+		}
+	}
 	if pp.codexProxy != nil {
 		account, err := pp.codexProxy.PrepareRequest(modelID, request)
 		if err != nil {
@@ -581,6 +641,12 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 	}
 	pp.reverseProxy.ServeHTTP(writer, request)
 	pp.markRequestComplete()
+
+	// Flush the converting writer if protocol conversion is active
+	if tw, ok := writer.(*protocol.TransformingWriter); ok {
+		tw.Flush()
+	}
+
 	return nil
 }
 
