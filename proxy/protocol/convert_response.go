@@ -84,14 +84,10 @@ func convertOpenAIResponseMapToResponses(resp map[string]any) (map[string]any, e
 	out["output"] = output
 	out["status"] = "completed"
 
-	// Convert usage
 	if usage, ok := resp["usage"].(map[string]any); ok {
-		out["usage"] = map[string]any{
-			"input_tokens":  usage["prompt_tokens"],
-			"output_tokens": usage["completion_tokens"],
-			"total_tokens":  usage["total_tokens"],
-		}
+		out["usage"] = convertOpenAIUsageToResponses(usage)
 	}
+	copyFields(out, resp, "service_tier")
 
 	return out, nil
 }
@@ -178,16 +174,10 @@ func convertResponsesResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 	})
 	out["choices"] = choices
 
-	// Convert usage
 	if usage, ok := resp["usage"].(map[string]any); ok {
-		inputTokens, _ := usage["input_tokens"].(float64)
-		outputTokens, _ := usage["output_tokens"].(float64)
-		out["usage"] = map[string]any{
-			"prompt_tokens":     int64(inputTokens),
-			"completion_tokens": int64(outputTokens),
-			"total_tokens":      int64(inputTokens + outputTokens),
-		}
+		out["usage"] = convertResponsesUsageToOpenAI(usage)
 	}
+	copyFields(out, resp, "service_tier")
 
 	return out, nil
 }
@@ -280,12 +270,8 @@ func convertOpenAIResponseMapToAnthropic(resp map[string]any) (map[string]any, e
 	out["stop_reason"] = stopReason
 	out["stop_sequence"] = nil
 
-	// Convert usage
 	if usage, ok := resp["usage"].(map[string]any); ok {
-		out["usage"] = map[string]any{
-			"input_tokens":  toInt(usage["prompt_tokens"]),
-			"output_tokens": toInt(usage["completion_tokens"]),
-		}
+		out["usage"] = convertOpenAIUsageToAnthropic(usage)
 	}
 
 	return out, nil
@@ -375,15 +361,9 @@ func convertAnthropicResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 		},
 	}
 
-	// Convert usage
 	if usage, ok := resp["usage"].(map[string]any); ok {
-		inputTokens := toInt(usage["input_tokens"])
-		outputTokens := toInt(usage["output_tokens"])
-		out["usage"] = map[string]any{
-			"prompt_tokens":     inputTokens,
-			"completion_tokens": outputTokens,
-			"total_tokens":      inputTokens + outputTokens,
-		}
+		out["usage"] = convertAnthropicUsageToOpenAI(usage)
+		copyFields(out, usage, "service_tier", "inference_geo")
 	}
 
 	return out, nil
@@ -414,8 +394,6 @@ func convertResponsesResponseMapToAnthropic(resp map[string]any) (map[string]any
 	return convertOpenAIResponseMapToAnthropic(openaiMap)
 }
 
-
-
 // ---------------------------------------------------------------------------
 // anthropic → responses response
 // ---------------------------------------------------------------------------
@@ -429,9 +407,118 @@ func convertAnthropicResponseMapToResponses(resp map[string]any) (map[string]any
 	return convertOpenAIResponseMapToResponses(openaiMap)
 }
 
-
-
 // ---------------------------------------------------------------------------
+func convertOpenAIUsageToResponses(usage map[string]any) map[string]any {
+	out := make(map[string]any, 5)
+	copyFields(out, usage, "total_tokens")
+	if v, ok := usage["prompt_tokens"]; ok {
+		out["input_tokens"] = v
+	}
+	if v, ok := usage["completion_tokens"]; ok {
+		out["output_tokens"] = v
+	}
+	if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+		inputDetails := make(map[string]any, len(details))
+		copyFields(inputDetails, details, "cached_tokens", "audio_tokens", "cache_creation_tokens", "cache_read_tokens")
+		if len(inputDetails) > 0 {
+			out["input_tokens_details"] = inputDetails
+		}
+	}
+	if details, ok := usage["completion_tokens_details"].(map[string]any); ok {
+		outputDetails := make(map[string]any, len(details))
+		copyFields(outputDetails, details, "reasoning_tokens", "audio_tokens", "accepted_prediction_tokens", "rejected_prediction_tokens")
+		if len(outputDetails) > 0 {
+			out["output_tokens_details"] = outputDetails
+		}
+	}
+	return out
+}
+
+func convertResponsesUsageToOpenAI(usage map[string]any) map[string]any {
+	out := make(map[string]any, 4)
+	inputTokens := toInt(usage["input_tokens"])
+	outputTokens := toInt(usage["output_tokens"])
+	out["prompt_tokens"] = inputTokens
+	out["completion_tokens"] = outputTokens
+	if total, ok := usage["total_tokens"]; ok {
+		out["total_tokens"] = total
+	} else {
+		out["total_tokens"] = inputTokens + outputTokens
+	}
+	if details, ok := usage["input_tokens_details"].(map[string]any); ok {
+		promptDetails := make(map[string]any, len(details))
+		copyFields(promptDetails, details, "cached_tokens", "audio_tokens", "cache_creation_tokens", "cache_read_tokens")
+		if len(promptDetails) > 0 {
+			out["prompt_tokens_details"] = promptDetails
+		}
+	}
+	if details, ok := usage["output_tokens_details"].(map[string]any); ok {
+		completionDetails := make(map[string]any, len(details))
+		copyFields(completionDetails, details, "reasoning_tokens", "audio_tokens", "accepted_prediction_tokens", "rejected_prediction_tokens")
+		if len(completionDetails) > 0 {
+			out["completion_tokens_details"] = completionDetails
+		}
+	}
+	return out
+}
+
+func convertOpenAIUsageToAnthropic(usage map[string]any) map[string]any {
+	out := make(map[string]any, 4)
+	promptTokens := toInt(usage["prompt_tokens"])
+	outputTokens := toInt(usage["completion_tokens"])
+	cacheReadTokens := int64(0)
+	cacheCreationTokens := int64(0)
+	if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+		cacheReadTokens = toInt(details["cached_tokens"])
+		cacheCreationTokens = toInt(details["cache_creation_tokens"])
+	}
+	inputTokens := promptTokens - cacheReadTokens - cacheCreationTokens
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
+	out["input_tokens"] = inputTokens
+	out["output_tokens"] = outputTokens
+	if cacheCreationTokens > 0 {
+		out["cache_creation_input_tokens"] = cacheCreationTokens
+	}
+	if cacheReadTokens > 0 {
+		out["cache_read_input_tokens"] = cacheReadTokens
+	}
+	return out
+}
+
+func convertAnthropicUsageToOpenAI(usage map[string]any) map[string]any {
+	out := make(map[string]any, 4)
+	inputTokens := toInt(usage["input_tokens"])
+	outputTokens := toInt(usage["output_tokens"])
+	cacheCreationTokens := toInt(usage["cache_creation_input_tokens"])
+	cacheReadTokens := toInt(usage["cache_read_input_tokens"])
+	promptTokens := inputTokens + cacheCreationTokens + cacheReadTokens
+	out["prompt_tokens"] = promptTokens
+	out["completion_tokens"] = outputTokens
+	out["total_tokens"] = promptTokens + outputTokens
+	promptDetails := map[string]any{}
+	if cacheReadTokens > 0 {
+		promptDetails["cached_tokens"] = cacheReadTokens
+		promptDetails["cache_read_tokens"] = cacheReadTokens
+	}
+	if cacheCreationTokens > 0 {
+		promptDetails["cache_creation_tokens"] = cacheCreationTokens
+	}
+	if len(promptDetails) > 0 {
+		out["prompt_tokens_details"] = promptDetails
+	}
+	return out
+}
+
+func copyFields(dst, src map[string]any, fields ...string) {
+	for _, field := range fields {
+		if value, ok := src[field]; ok {
+			dst[field] = value
+		}
+	}
+}
+
 // helpers
 // ---------------------------------------------------------------------------
 

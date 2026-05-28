@@ -2,6 +2,9 @@ package protocol
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -64,6 +67,7 @@ func TestRewritePath(t *testing.T) {
 		{"/v1/responses", FormatOpenAI, "/v1/chat/completions"},
 		{"/v1/messages", FormatOpenAI, "/v1/chat/completions"},
 		{"/v/responses", FormatOpenAI, "/v/chat/completions"},
+		{"/api/v1/chat/completions", FormatResponses, "/api/v1/responses"},
 		{"/v1/chat/completions", FormatUnknown, "/v1/chat/completions"},
 	}
 	for _, tt := range tests {
@@ -391,6 +395,32 @@ func TestRoundTripResponsesOpenAI(t *testing.T) {
 	if _, ok := openai["messages"]; !ok {
 		t.Fatal("missing 'messages' field in OpenAI request")
 	}
+
+	responsesBody, err := openAIToResponsesRequest(openaiBody)
+	if err != nil {
+		t.Fatalf("openai→responses: %v", err)
+	}
+	var responses map[string]any
+	if err := json.Unmarshal(responsesBody, &responses); err != nil {
+		t.Fatalf("invalid round-trip JSON: %v", err)
+	}
+	if responses["model"] != "gpt-4" {
+		t.Errorf("model = %v, want gpt-4", responses["model"])
+	}
+	if responses["instructions"] != "Be helpful" {
+		t.Errorf("instructions = %v, want Be helpful", responses["instructions"])
+	}
+	if responses["max_output_tokens"] != 100.0 {
+		t.Errorf("max_output_tokens = %v, want 100", responses["max_output_tokens"])
+	}
+	input, ok := responses["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("input = %v, want one item", responses["input"])
+	}
+	msg := input[0].(map[string]any)
+	if msg["role"] != "user" || msg["content"] != "Hello" {
+		t.Errorf("input[0] = %v, want user Hello", msg)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -449,8 +479,14 @@ func TestConvertAnthropicStreamToOpenAI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !contains(result, "content") {
-		t.Errorf("expected content in output: %s", string(result))
+	var contentChunk map[string]any
+	if err := json.Unmarshal(result, &contentChunk); err != nil {
+		t.Fatalf("failed to unmarshal content chunk: %v", err)
+	}
+	choices := contentChunk["choices"].([]any)
+	delta := choices[0].(map[string]any)["delta"].(map[string]any)
+	if delta["content"] != "Hi" {
+		t.Errorf("content delta = %v, want Hi", delta["content"])
 	}
 
 	// message_stop → [DONE]
@@ -569,6 +605,239 @@ func TestOpenAIToAnthropicToolChoice(t *testing.T) {
 	}
 	if tc["type"] != "any" {
 		t.Errorf("tool_choice type = %v, want any", tc["type"])
+	}
+}
+
+func TestOpenAIToResponsesToolsPreservesToolResults(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":"weather"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":"{\"location\":\"Paris\"}"}}]},{"role":"tool","tool_call_id":"call_abc","content":"sunny"}]}`
+
+	body, err := openAIToResponsesRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	items := req["input"].([]any)
+	if len(items) != 4 {
+		t.Fatalf("input length = %d, want 4: %v", len(items), items)
+	}
+	assistant := items[1].(map[string]any)
+	if assistant["role"] != "assistant" {
+		t.Fatalf("input[1] role = %v, want assistant", assistant["role"])
+	}
+	call := items[2].(map[string]any)
+	if call["type"] != "function_call" || call["call_id"] != "call_abc" {
+		t.Fatalf("input[2] = %v, want function_call call_abc", call)
+	}
+	output := items[3].(map[string]any)
+	if output["type"] != "function_call_output" || output["call_id"] != "call_abc" || output["output"] != "sunny" {
+		t.Fatalf("input[3] = %v, want function_call_output sunny", output)
+	}
+}
+
+func TestToolChoiceObjectConversion(t *testing.T) {
+	responsesInput := `{"model":"gpt-4","input":"Hi","tool_choice":{"type":"function","name":"lookup"}}`
+	body, err := responsesToOpenAIRequest([]byte(responsesInput))
+	if err != nil {
+		t.Fatalf("responses→openai: %v", err)
+	}
+	var openai map[string]any
+	if err := json.Unmarshal(body, &openai); err != nil {
+		t.Fatalf("failed to unmarshal OpenAI request: %v", err)
+	}
+	choice := openai["tool_choice"].(map[string]any)
+	fn := choice["function"].(map[string]any)
+	if choice["type"] != "function" || fn["name"] != "lookup" {
+		t.Fatalf("OpenAI tool_choice = %v, want function lookup", choice)
+	}
+
+	openAIInput := `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"tool_choice":{"type":"function","function":{"name":"lookup"}}}`
+	body, err = openAIToResponsesRequest([]byte(openAIInput))
+	if err != nil {
+		t.Fatalf("openai→responses: %v", err)
+	}
+	var responses map[string]any
+	if err := json.Unmarshal(body, &responses); err != nil {
+		t.Fatalf("failed to unmarshal Responses request: %v", err)
+	}
+	choice = responses["tool_choice"].(map[string]any)
+	if choice["type"] != "function" || choice["name"] != "lookup" {
+		t.Fatalf("Responses tool_choice = %v, want function lookup", choice)
+	}
+}
+
+func TestAnthropicToOpenAIMixedToolResultContent(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"text","text":"before"},{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"result"}]},{"type":"text","text":"after"}]}],"max_tokens":100}`
+	body, err := anthropicToOpenAIRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	messages := req["messages"].([]any)
+	if len(messages) != 3 {
+		t.Fatalf("messages length = %d, want 3: %v", len(messages), messages)
+	}
+	first := messages[0].(map[string]any)
+	tool := messages[1].(map[string]any)
+	last := messages[2].(map[string]any)
+	if first["role"] != "user" || first["content"] != "before" {
+		t.Fatalf("first message = %v, want user before", first)
+	}
+	if tool["role"] != "tool" || tool["tool_call_id"] != "toolu_1" || tool["content"] != "result" {
+		t.Fatalf("tool message = %v, want tool result", tool)
+	}
+	if last["role"] != "user" || last["content"] != "after" {
+		t.Fatalf("last message = %v, want user after", last)
+	}
+}
+
+func TestTransformingWriterDelaysContentLengthUntilConverted(t *testing.T) {
+	conv, err := NewConverter(FormatOpenAI, FormatResponses)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", "999")
+	w.WriteHeader(http.StatusOK)
+	_, err = w.Write([]byte(`{"id":"resp_1","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}`))
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	w.Flush()
+
+	if r.Header().Get("Content-Length") != strconv.Itoa(r.Body.Len()) {
+		t.Fatalf("Content-Length = %q, want converted body length %d; body=%s", r.Header().Get("Content-Length"), r.Body.Len(), r.Body.String())
+	}
+	if !contains(r.Body.Bytes(), "chat.completion") || !contains(r.Body.Bytes(), "hello") {
+		t.Fatalf("body was not converted to OpenAI format: %s", r.Body.String())
+	}
+}
+
+func TestSchemaMappingPreservesRequestControls(t *testing.T) {
+	responsesInput := `{"model":"gpt-4","input":"Hi","text":{"format":{"type":"json_object"}},"stream_options":{"include_usage":true},"parallel_tool_calls":false,"service_tier":"priority","metadata":{"trace":"abc"},"top_logprobs":3}`
+	body, err := responsesToOpenAIRequest([]byte(responsesInput))
+	if err != nil {
+		t.Fatalf("responses→openai: %v", err)
+	}
+	var openai map[string]any
+	if err := json.Unmarshal(body, &openai); err != nil {
+		t.Fatalf("failed to unmarshal OpenAI request: %v", err)
+	}
+	if openai["response_format"].(map[string]any)["type"] != "json_object" {
+		t.Fatalf("response_format = %v", openai["response_format"])
+	}
+	if openai["stream_options"].(map[string]any)["include_usage"] != true || openai["parallel_tool_calls"] != false || openai["service_tier"] != "priority" {
+		t.Fatalf("request controls were not preserved: %v", openai)
+	}
+
+	openAIInput := `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"x"}},"user":"user-1","prompt_cache_key":"bucket"}`
+	body, err = openAIToResponsesRequest([]byte(openAIInput))
+	if err != nil {
+		t.Fatalf("openai→responses: %v", err)
+	}
+	var responses map[string]any
+	if err := json.Unmarshal(body, &responses); err != nil {
+		t.Fatalf("failed to unmarshal Responses request: %v", err)
+	}
+	text := responses["text"].(map[string]any)
+	format := text["format"].(map[string]any)
+	if format["type"] != "json_schema" || responses["safety_identifier"] != "user-1" || responses["prompt_cache_key"] != "bucket" {
+		t.Fatalf("Responses controls were not mapped: %v", responses)
+	}
+}
+
+func TestSchemaMappingPreservesContentCacheAndMedia(t *testing.T) {
+	responsesContent := []any{
+		map[string]any{"type": "input_text", "text": "cache me", "cache_control": map[string]any{"type": "ephemeral"}},
+		map[string]any{"type": "input_image", "image_data": "abc", "media_type": "image/webp", "detail": "low"},
+	}
+	openaiContent := convertResponsesContentToOpenAI(responsesContent).([]any)
+	text := openaiContent[0].(map[string]any)
+	if text["cache_control"].(map[string]any)["type"] != "ephemeral" {
+		t.Fatalf("cache_control was not preserved: %v", text)
+	}
+	image := openaiContent[1].(map[string]any)["image_url"].(map[string]any)
+	if image["url"] != "data:image/webp;base64,abc" || image["detail"] != "low" {
+		t.Fatalf("image metadata was not preserved: %v", image)
+	}
+
+	anthropicContent := []any{map[string]any{"type": "text", "text": "hello", "cache_control": map[string]any{"type": "ephemeral"}}}
+	openaiContent = anthropicContentToOpenAI(anthropicContent).([]any)
+	text = openaiContent[0].(map[string]any)
+	if text["cache_control"].(map[string]any)["type"] != "ephemeral" {
+		t.Fatalf("Anthropic cache_control was not preserved: %v", text)
+	}
+}
+
+func TestSchemaMappingPreservesUsageCacheDetails(t *testing.T) {
+	openAIResp := `{"id":"chatcmpl-1","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":25,"total_tokens":125,"prompt_tokens_details":{"cached_tokens":40,"cache_creation_tokens":10,"audio_tokens":2},"completion_tokens_details":{"reasoning_tokens":7,"accepted_prediction_tokens":3}}}`
+	body, err := convertOpenAIResponseToResponses([]byte(openAIResp))
+	if err != nil {
+		t.Fatalf("openai→responses response: %v", err)
+	}
+	var responses map[string]any
+	if err := json.Unmarshal(body, &responses); err != nil {
+		t.Fatalf("failed to unmarshal Responses response: %v", err)
+	}
+	usage := responses["usage"].(map[string]any)
+	inputDetails := usage["input_tokens_details"].(map[string]any)
+	outputDetails := usage["output_tokens_details"].(map[string]any)
+	if usage["input_tokens"] != 100.0 || inputDetails["cached_tokens"] != 40.0 || inputDetails["cache_creation_tokens"] != 10.0 || outputDetails["reasoning_tokens"] != 7.0 {
+		t.Fatalf("Responses usage did not preserve cache details: %v", usage)
+	}
+
+	body, err = convertOpenAIResponseToAnthropic([]byte(openAIResp))
+	if err != nil {
+		t.Fatalf("openai→anthropic response: %v", err)
+	}
+	var anthropic map[string]any
+	if err := json.Unmarshal(body, &anthropic); err != nil {
+		t.Fatalf("failed to unmarshal Anthropic response: %v", err)
+	}
+	usage = anthropic["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(50) || usage["cache_read_input_tokens"] != float64(40) || usage["cache_creation_input_tokens"] != float64(10) {
+		t.Fatalf("Anthropic usage did not preserve cache split: %v", usage)
+	}
+
+	anthropicResp := `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude","stop_reason":"end_turn","usage":{"input_tokens":50,"output_tokens":25,"cache_creation_input_tokens":10,"cache_read_input_tokens":40,"service_tier":"standard"}}`
+	body, err = convertAnthropicResponseToOpenAI([]byte(anthropicResp))
+	if err != nil {
+		t.Fatalf("anthropic→openai response: %v", err)
+	}
+	var backToOpenAI map[string]any
+	if err := json.Unmarshal(body, &backToOpenAI); err != nil {
+		t.Fatalf("failed to unmarshal OpenAI response: %v", err)
+	}
+	usage = backToOpenAI["usage"].(map[string]any)
+	promptDetails := usage["prompt_tokens_details"].(map[string]any)
+	if usage["prompt_tokens"] != float64(100) || promptDetails["cached_tokens"] != float64(40) || promptDetails["cache_creation_tokens"] != float64(10) || backToOpenAI["service_tier"] != "standard" {
+		t.Fatalf("OpenAI usage did not preserve Anthropic cache details: response=%v usage=%v", backToOpenAI, usage)
+	}
+}
+
+func TestSchemaMappingPreservesStreamingUsage(t *testing.T) {
+	openAIChunk := `{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":25,"total_tokens":125,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":7}}}`
+	converted, err := convertOpenAIStreamToResponses([]byte(openAIChunk))
+	if err != nil {
+		t.Fatalf("openai stream→responses: %v", err)
+	}
+	var evt map[string]any
+	if err := json.Unmarshal(converted, &evt); err != nil {
+		t.Fatalf("failed to unmarshal Responses event: %v", err)
+	}
+	response := evt["response"].(map[string]any)
+	usage := response["usage"].(map[string]any)
+	if usage["input_tokens_details"].(map[string]any)["cached_tokens"] != 40.0 {
+		t.Fatalf("streaming usage cache details lost: %v", usage)
 	}
 }
 

@@ -21,6 +21,8 @@ type TransformingWriter struct {
 	buf         *bytes.Buffer
 	streamBuf   *bytes.Buffer // accumulates partial SSE lines across Write calls
 	wroteHeader bool
+	wroteBody   bool
+	statusCode  int
 	isStreaming bool
 }
 
@@ -40,12 +42,17 @@ func (w *TransformingWriter) WriteHeader(statusCode int) {
 		return
 	}
 	w.wroteHeader = true
+	w.statusCode = statusCode
 
-	// Detect streaming from Content-Type
+	// Detect streaming from Content-Type. Streaming responses must send headers
+	// immediately so clients can start consuming the event stream. Non-streaming
+	// responses are buffered and converted in Flush, so their headers must not be
+	// committed until the final Content-Length is known.
 	contentType := w.Header().Get("Content-Type")
 	w.isStreaming = strings.Contains(contentType, "text/event-stream")
-
-	w.ResponseWriter.WriteHeader(statusCode)
+	if w.isStreaming {
+		w.ResponseWriter.WriteHeader(statusCode)
+	}
 }
 
 // Write intercepts response data and either buffers (non-streaming) or
@@ -66,6 +73,10 @@ func (w *TransformingWriter) Write(data []byte) (int, error) {
 // For streaming responses, this is a pass-through.
 // For non-streaming responses, this triggers the final conversion and write.
 func (w *TransformingWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+
 	if w.isStreaming {
 		if f, ok := w.ResponseWriter.(http.Flusher); ok {
 			f.Flush()
@@ -73,48 +84,36 @@ func (w *TransformingWriter) Flush() {
 		return
 	}
 
-	// Non-streaming: convert the buffered response
-	if w.buf.Len() == 0 {
+	if w.wroteBody {
 		return
 	}
+	w.wroteBody = true
 
 	body := w.buf.Bytes()
+	writeBody := body
 
-	// Check if it looks like JSON
+	// Check if it looks like JSON.
 	contentType := w.Header().Get("Content-Type")
-	if !strings.Contains(contentType, "application/json") && !json.Valid(body) {
-		w.ResponseWriter.Write(body)
-		return
+	if len(body) > 0 && (strings.Contains(contentType, "application/json") || json.Valid(body)) {
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err == nil {
+			// Pass through error responses as-is — converting them via the success
+			// path would produce a nonsensical response shape.
+			if _, hasError := parsed["error"]; !hasError {
+				if converted, err := w.converter.ConvertResponseMap(parsed); err == nil {
+					if result, err := json.Marshal(converted); err == nil {
+						writeBody = result
+					}
+				}
+			}
+		}
 	}
 
-	// Single parse for the entire response
-	var parsed map[string]any
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		w.ResponseWriter.Write(body)
-		return
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(writeBody)))
+	w.ResponseWriter.WriteHeader(w.statusCode)
+	if len(writeBody) > 0 {
+		_, _ = w.ResponseWriter.Write(writeBody)
 	}
-	// Pass through error responses as-is — converting them via the success
-	// path would produce a nonsensical response shape.
-	if _, hasError := parsed["error"]; hasError {
-		w.ResponseWriter.Write(body)
-		return
-	}
-
-	// Convert using the pre-parsed map (no redundant parse)
-	converted, err := w.converter.ConvertResponseMap(parsed)
-	if err != nil {
-		w.ResponseWriter.Write(body)
-		return
-	}
-
-	result, err := json.Marshal(converted)
-	if err != nil {
-		w.ResponseWriter.Write(body)
-		return
-	}
-
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(result)))
-	w.ResponseWriter.Write(result)
 }
 
 // writeStream processes SSE data for streaming conversion.
@@ -173,7 +172,9 @@ func (w *TransformingWriter) writeStream(data []byte) (int, error) {
 	}
 
 	if outBuf.Len() > 0 {
-		w.ResponseWriter.Write(outBuf.Bytes())
+		if _, err := w.ResponseWriter.Write(outBuf.Bytes()); err != nil {
+			return len(data), err
+		}
 		if f, ok := w.ResponseWriter.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -181,9 +182,6 @@ func (w *TransformingWriter) writeStream(data []byte) (int, error) {
 
 	return len(data), nil
 }
-
-
-
 
 // Hijack implements the http.Hijacker interface for WebSocket support.
 func (w *TransformingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {

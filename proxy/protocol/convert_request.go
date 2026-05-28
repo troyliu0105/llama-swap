@@ -47,13 +47,36 @@ func responsesToOpenAIRequest(body []byte) ([]byte, error) {
 				if !ok {
 					continue
 				}
-				role, _ := msg["role"].(string)
-				content := msg["content"]
-				outMsg := map[string]any{
-					"role":    role,
-					"content": convertResponsesContentToOpenAI(content),
+				itemType, _ := msg["type"].(string)
+				switch itemType {
+				case "function_call":
+					messages = append(messages, map[string]any{
+						"role":    "assistant",
+						"content": nil,
+						"tool_calls": []any{map[string]any{
+							"id":   msg["call_id"],
+							"type": "function",
+							"function": map[string]any{
+								"name":      msg["name"],
+								"arguments": msg["arguments"],
+							},
+						}},
+					})
+				case "function_call_output":
+					messages = append(messages, map[string]any{
+						"role":         "tool",
+						"tool_call_id": msg["call_id"],
+						"content":      msg["output"],
+					})
+				default:
+					role, _ := msg["role"].(string)
+					content := msg["content"]
+					outMsg := map[string]any{
+						"role":    role,
+						"content": convertResponsesContentToOpenAI(content),
+					}
+					messages = append(messages, outMsg)
 				}
-				messages = append(messages, outMsg)
 			}
 		}
 	}
@@ -84,6 +107,12 @@ func responsesToOpenAIRequest(body []byte) ([]byte, error) {
 	if v, ok := req["seed"]; ok {
 		out["seed"] = v
 	}
+	copyFields(out, req, "stream_options", "parallel_tool_calls", "service_tier", "metadata", "top_logprobs")
+	if text, ok := req["text"].(map[string]any); ok {
+		if format, ok := text["format"]; ok {
+			out["response_format"] = format
+		}
+	}
 
 	// Convert tools (function type only)
 	if tools, ok := req["tools"].([]any); ok {
@@ -112,7 +141,7 @@ func responsesToOpenAIRequest(body []byte) ([]byte, error) {
 	}
 
 	if v, ok := req["tool_choice"]; ok {
-		out["tool_choice"] = v
+		out["tool_choice"] = convertResponsesToolChoiceToOpenAI(v)
 	}
 
 	return json.Marshal(out)
@@ -133,37 +162,40 @@ func convertResponsesContentToOpenAI(content any) any {
 			typ, _ := p["type"].(string)
 			switch typ {
 			case "input_text":
-				parts = append(parts, map[string]any{
-					"type": "text",
-					"text": p["text"],
-				})
+				part := map[string]any{"type": "text", "text": p["text"]}
+				copyFields(part, p, "cache_control", "annotations", "citations")
+				parts = append(parts, part)
 			case "input_image":
 				imgURL, _ := p["image_url"].(string)
 				imgData, _ := p["image_data"].(string)
 				if imgURL != "" {
-					parts = append(parts, map[string]any{
-						"type":      "image_url",
-						"image_url": map[string]any{"url": imgURL},
-					})
+					imageURL := map[string]any{"url": imgURL}
+					copyFields(imageURL, p, "detail")
+					parts = append(parts, map[string]any{"type": "image_url", "image_url": imageURL})
 				} else if imgData != "" {
-					parts = append(parts, map[string]any{
-						"type":      "image_url",
-						"image_url": map[string]any{"url": "data:image/png;base64," + imgData},
-					})
+					mediaType, _ := p["media_type"].(string)
+					if mediaType == "" {
+						mediaType = "image/png"
+					}
+					imageURL := map[string]any{"url": "data:" + mediaType + ";base64," + imgData}
+					copyFields(imageURL, p, "detail")
+					parts = append(parts, map[string]any{"type": "image_url", "image_url": imageURL})
+				}
+			case "input_file":
+				file := map[string]any{}
+				copyFields(file, p, "file_url", "file_data", "file_id", "filename")
+				if len(file) > 0 {
+					parts = append(parts, map[string]any{"type": "file", "file": file})
 				}
 			default:
-				// Pass through as text if has text field
 				if text, ok := p["text"].(string); ok {
-					parts = append(parts, map[string]any{
-						"type": "text",
-						"text": text,
-					})
+					parts = append(parts, map[string]any{"type": "text", "text": text})
 				}
 			}
 		}
 		if len(parts) == 1 {
 			if t, ok := parts[0].(map[string]any); ok {
-				if t["type"] == "text" {
+				if t["type"] == "text" && len(t) == 2 {
 					return t["text"]
 				}
 			}
@@ -172,6 +204,42 @@ func convertResponsesContentToOpenAI(content any) any {
 	default:
 		return content
 	}
+}
+
+func convertResponsesToolChoiceToOpenAI(choice any) any {
+	switch v := choice.(type) {
+	case map[string]any:
+		choiceType, _ := v["type"].(string)
+		if choiceType == "function" {
+			if _, ok := v["function"]; ok {
+				return v
+			}
+			return map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name": v["name"],
+				},
+			}
+		}
+	}
+	return choice
+}
+
+func convertOpenAIToolChoiceToResponses(choice any) any {
+	switch v := choice.(type) {
+	case map[string]any:
+		choiceType, _ := v["type"].(string)
+		if choiceType == "function" {
+			if fn, ok := v["function"].(map[string]any); ok {
+				return map[string]any{
+					"type": "function",
+					"name": fn["name"],
+				}
+			}
+			return v
+		}
+	}
+	return choice
 }
 
 // ---------------------------------------------------------------------------
@@ -211,8 +279,12 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 				continue
 			}
 
-			// Skip tool role messages for now (complex conversion)
 			if role == "tool" {
+				input = append(input, map[string]any{
+					"type":    "function_call_output",
+					"call_id": msg["tool_call_id"],
+					"output":  openAIContentText(msg["content"]),
+				})
 				continue
 			}
 
@@ -220,8 +292,10 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 				"role":    role,
 				"content": convertOpenAIContentToResponses(msg["content"]),
 			}
+			input = append(input, outMsg)
 
-			// Handle assistant tool_calls
+			// Handle assistant tool_calls after the assistant message so the
+			// Responses input preserves chat message order.
 			if role == "assistant" {
 				if toolCalls, ok := msg["tool_calls"].([]any); ok && len(toolCalls) > 0 {
 					for _, tc := range toolCalls {
@@ -239,8 +313,6 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 					}
 				}
 			}
-
-			input = append(input, outMsg)
 		}
 	}
 
@@ -266,6 +338,13 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 	}
 	if v, ok := req["stop"]; ok {
 		out["stop"] = v
+	}
+	copyFields(out, req, "stream_options", "parallel_tool_calls", "service_tier", "metadata", "top_logprobs", "prompt_cache_key")
+	if responseFormat, ok := req["response_format"]; ok {
+		out["text"] = map[string]any{"format": responseFormat}
+	}
+	if user, ok := req["user"]; ok {
+		out["safety_identifier"] = user
 	}
 
 	// Convert tools
@@ -294,7 +373,7 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 	}
 
 	if v, ok := req["tool_choice"]; ok {
-		out["tool_choice"] = v
+		out["tool_choice"] = convertOpenAIToolChoiceToResponses(v)
 	}
 
 	return json.Marshal(out)
@@ -315,41 +394,42 @@ func convertOpenAIContentToResponses(content any) any {
 			typ, _ := p["type"].(string)
 			switch typ {
 			case "text":
-				parts = append(parts, map[string]any{
-					"type": "input_text",
-					"text": p["text"],
-				})
+				part := map[string]any{"type": "input_text", "text": p["text"]}
+				copyFields(part, p, "cache_control", "annotations", "citations")
+				parts = append(parts, part)
 			case "image_url":
 				imgMap, _ := p["image_url"].(map[string]any)
 				if imgMap != nil {
 					url, _ := imgMap["url"].(string)
 					if strings.HasPrefix(url, "data:image/") {
-						// Extract base64 data
 						if idx := strings.Index(url, ","); idx >= 0 {
-							parts = append(parts, map[string]any{
-								"type":       "input_image",
-								"image_data": url[idx+1:],
-							})
+							part := map[string]any{"type": "input_image", "image_data": url[idx+1:]}
+							mediaInfo := strings.TrimPrefix(url[:idx], "data:")
+							part["media_type"] = strings.TrimSuffix(mediaInfo, ";base64")
+							copyFields(part, imgMap, "detail")
+							parts = append(parts, part)
 						}
 					} else {
-						parts = append(parts, map[string]any{
-							"type":      "input_image",
-							"image_url": url,
-						})
+						part := map[string]any{"type": "input_image", "image_url": url}
+						copyFields(part, imgMap, "detail")
+						parts = append(parts, part)
 					}
+				}
+			case "file":
+				if file, ok := p["file"].(map[string]any); ok {
+					part := map[string]any{"type": "input_file"}
+					copyFields(part, file, "file_url", "file_data", "file_id", "filename")
+					parts = append(parts, part)
 				}
 			default:
 				if text, ok := p["text"].(string); ok {
-					parts = append(parts, map[string]any{
-						"type": "input_text",
-						"text": text,
-					})
+					parts = append(parts, map[string]any{"type": "input_text", "text": text})
 				}
 			}
 		}
 		if len(parts) == 1 {
 			if t, ok := parts[0].(map[string]any); ok {
-				if t["type"] == "input_text" {
+				if t["type"] == "input_text" && len(t) == 2 {
 					return t["text"]
 				}
 			}
@@ -450,34 +530,36 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 					outMsg["content"] = anthropicContentToOpenAI(content)
 				}
 			} else if role == "user" {
-				// Check for tool_result blocks
 				if contentArr, ok := content.([]any); ok {
-					hasToolResult := false
+					var userBlocks []any
+					flushUserBlocks := func() {
+						if len(userBlocks) == 0 {
+							return
+						}
+						messages = append(messages, map[string]any{
+							"role":    "user",
+							"content": anthropicContentToOpenAI(userBlocks),
+						})
+						userBlocks = nil
+					}
 					for _, block := range contentArr {
 						blockMap, ok := block.(map[string]any)
 						if !ok {
 							continue
 						}
 						if blockType, _ := blockMap["type"].(string); blockType == "tool_result" {
-							hasToolResult = true
-							toolUseID, _ := blockMap["tool_use_id"].(string)
-							resultContent := blockMap["content"]
-							resultStr := fmt.Sprint(resultContent)
-							if arr, ok := resultContent.([]any); ok && len(arr) > 0 {
-								if first, ok := arr[0].(map[string]any); ok {
-									resultStr, _ = first["text"].(string)
-								}
-							}
+							flushUserBlocks()
 							messages = append(messages, map[string]any{
 								"role":         "tool",
-								"content":      resultStr,
-								"tool_call_id": toolUseID,
+								"content":      anthropicToolResultText(blockMap["content"]),
+								"tool_call_id": blockMap["tool_use_id"],
 							})
+							continue
 						}
+						userBlocks = append(userBlocks, block)
 					}
-					if hasToolResult {
-						continue
-					}
+					flushUserBlocks()
+					continue
 				}
 				outMsg["content"] = anthropicContentToOpenAI(content)
 			} else {
@@ -504,6 +586,12 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 	}
 	if v, ok := req["stop_sequences"]; ok {
 		out["stop"] = v
+	}
+	copyFields(out, req, "metadata", "service_tier", "stream_options", "top_logprobs")
+	if metadata, ok := req["metadata"].(map[string]any); ok {
+		if userID, ok := metadata["user_id"]; ok {
+			out["user"] = userID
+		}
 	}
 
 	// Convert tools
@@ -570,41 +658,30 @@ func anthropicContentToOpenAI(content any) any {
 			switch typ {
 			case "text":
 				text, _ := b["text"].(string)
-				parts = append(parts, map[string]any{
-					"type": "text",
-					"text": text,
-				})
+				part := map[string]any{"type": "text", "text": text}
+				copyFields(part, b, "cache_control", "citations")
+				parts = append(parts, part)
 			case "image":
 				source, _ := b["source"].(map[string]any)
 				if source != nil {
 					srcType, _ := source["type"].(string)
 					if srcType == "url" {
-						parts = append(parts, map[string]any{
-							"type":      "image_url",
-							"image_url": map[string]any{"url": source["url"]},
-						})
+						parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": source["url"]}})
 					} else if srcType == "base64" {
 						mediaType, _ := source["media_type"].(string)
 						data, _ := source["data"].(string)
-						parts = append(parts, map[string]any{
-							"type":      "image_url",
-							"image_url": map[string]any{"url": "data:" + mediaType + ";base64," + data},
-						})
+						parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + mediaType + ";base64," + data}})
 					}
 				}
-			// tool_use and tool_result are handled at the message level
 			default:
 				if text, ok := b["text"].(string); ok {
-					parts = append(parts, map[string]any{
-						"type": "text",
-						"text": text,
-					})
+					parts = append(parts, map[string]any{"type": "text", "text": text})
 				}
 			}
 		}
 		if len(parts) == 1 {
 			if t, ok := parts[0].(map[string]any); ok {
-				if t["type"] == "text" {
+				if t["type"] == "text" && len(t) == 2 {
 					return t["text"]
 				}
 			}
@@ -742,6 +819,10 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 	if v, ok := req["stop"]; ok {
 		out["stop_sequences"] = v
 	}
+	copyFields(out, req, "metadata", "service_tier", "cache_control", "container")
+	if user, ok := req["user"]; ok {
+		out["metadata"] = map[string]any{"user_id": user}
+	}
 
 	// Convert tools
 	if tools, ok := req["tools"].([]any); ok {
@@ -811,10 +892,12 @@ func openAIContentToAnthropic(content any) any {
 			typ, _ := p["type"].(string)
 			switch typ {
 			case "text":
-				blocks = append(blocks, map[string]any{
+				block := map[string]any{
 					"type": "text",
 					"text": p["text"],
-				})
+				}
+				copyFields(block, p, "cache_control", "citations")
+				blocks = append(blocks, block)
 			case "image_url":
 				imgMap, _ := p["image_url"].(map[string]any)
 				if imgMap != nil {
@@ -885,4 +968,50 @@ func anthropicToResponsesRequest(body []byte) ([]byte, error) {
 		return nil, err
 	}
 	return openAIToResponsesRequest(openaiBody)
+}
+
+func openAIContentText(content any) string {
+	switch v := content.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case []any:
+		var sb strings.Builder
+		for _, part := range v {
+			p, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := p["text"].(string); ok {
+				sb.WriteString(text)
+			}
+		}
+		return sb.String()
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+func anthropicToolResultText(content any) string {
+	switch v := content.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case []any:
+		var sb strings.Builder
+		for _, item := range v {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := block["text"].(string); ok {
+				sb.WriteString(text)
+			}
+		}
+		return sb.String()
+	default:
+		return fmt.Sprint(v)
+	}
 }

@@ -605,8 +605,11 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 				}
 			}
 
-			// Wrap the response writer for response conversion
+			// Wrap the response writer for response conversion. Flush via defer so
+			// every serve path (direct, queued, serialized, or error) releases any
+			// buffered non-streaming body before ProxyRequest returns.
 			convertingWriter := protocol.NewTransformingWriter(writer, converter)
+			defer convertingWriter.Flush()
 			writer = convertingWriter
 
 			peerLog("[PEER] ▶ %s | %s | convert %s→%s | %s\n",
@@ -666,11 +669,6 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 	}
 	pp.reverseProxy.ServeHTTP(writer, request)
 	pp.markRequestComplete()
-
-	// Flush the converting writer if protocol conversion is active
-	if tw, ok := writer.(*protocol.TransformingWriter); ok {
-		tw.Flush()
-	}
 
 	return nil
 }

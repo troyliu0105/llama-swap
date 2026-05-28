@@ -305,3 +305,30 @@ models:
 		t.Errorf("expected Timeout=60s (default), got %v", config.Timeout)
 	}
 }
+
+func TestExtendedPeerConfig_UpstreamFormatValidation(t *testing.T) {
+	validYAML := `
+proxy: http://192.168.1.23:8080
+models:
+  - model_a
+upstreamFormat: responses
+`
+	var valid ExtendedPeerConfig
+	if err := yaml.Unmarshal([]byte(validYAML), &valid); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if valid.UpstreamFormat != "responses" {
+		t.Fatalf("upstreamFormat = %q, want responses", valid.UpstreamFormat)
+	}
+
+	invalidYAML := `
+proxy: http://192.168.1.23:8080
+models:
+  - model_a
+upstreamFormat: bogus
+`
+	var invalid ExtendedPeerConfig
+	if err := yaml.Unmarshal([]byte(invalidYAML), &invalid); err == nil {
+		t.Fatal("expected invalid upstreamFormat to fail")
+	}
+}

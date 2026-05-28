@@ -437,3 +437,43 @@ func TestEnhancedPeerProxy_QueueFull(t *testing.T) {
 	assert.Equal(t, 1, serviceUnavailableCount)
 	assert.Equal(t, 1, successCount)
 }
+
+func TestEnhancedPeerProxy_ProtocolConversionFlushesConcurrencyPath(t *testing.T) {
+	var receivedPath string
+	upstreamBody := []byte(`{"id":"resp_1","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"converted"}]}]}`)
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryExtConfig{
+		"peer1": config.ExtendedPeerConfig{
+			Proxy:          testServer.URL,
+			ProxyURL:       proxyURL,
+			Models:         []string{"test-model"},
+			MaxConcurrent:  1,
+			QueueSize:      1,
+			QueueTimeout:   time.Second,
+			UpstreamFormat: "responses",
+		},
+	}
+
+	pm, err := NewEnhancedPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/responses", receivedPath)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "chat.completion")
+	assert.Contains(t, w.Body.String(), "converted")
+	assert.Equal(t, int64(len(w.Body.Bytes())), w.Result().ContentLength)
+	assert.NotEqual(t, int64(len(upstreamBody)), w.Result().ContentLength)
+}

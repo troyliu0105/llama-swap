@@ -25,28 +25,24 @@ func DetectClientFormat(path string) Format {
 }
 
 // RewritePath changes the endpoint path from one format to another.
-// It preserves any prefix (e.g. /v1, /v) before the endpoint.
+// It preserves any path prefix before the protocol endpoint.
 func RewritePath(originalPath string, targetFormat Format) string {
-	prefix := ""
-
-	// Extract prefix
-	if strings.HasPrefix(originalPath, "/v1/") {
-		prefix = "/v1"
-	} else if strings.HasPrefix(originalPath, "/v/") {
-		prefix = "/v"
-	}
-
-	var suffix string
+	var targetSuffix string
 	switch targetFormat {
 	case FormatOpenAI:
-		suffix = "/chat/completions"
+		targetSuffix = "/chat/completions"
 	case FormatResponses:
-		suffix = "/responses"
+		targetSuffix = "/responses"
 	case FormatAnthropic:
-		suffix = "/messages"
+		targetSuffix = "/messages"
 	default:
 		return originalPath
 	}
 
-	return prefix + suffix
+	for _, currentSuffix := range []string{"/chat/completions", "/responses", "/messages"} {
+		if strings.HasSuffix(originalPath, currentSuffix) {
+			return strings.TrimSuffix(originalPath, currentSuffix) + targetSuffix
+		}
+	}
+	return originalPath
 }

@@ -126,6 +126,11 @@ func (c ExtendedPeerConfig) Validate() error {
 	if err := validatePeerConfigFields(c.MaxConcurrent, c.QueueSize, c.QueueTimeout, c.RequestInterval, c.Timeout); err != nil {
 		return err
 	}
+	switch c.UpstreamFormat {
+	case "", "openai", "responses", "anthropic":
+	default:
+		return fmt.Errorf("upstreamFormat must be one of openai, responses, anthropic, got %q", c.UpstreamFormat)
+	}
 	if c.Type == "codex" {
 		if c.Codex == nil {
 			return fmt.Errorf("codex config is required when type is codex")

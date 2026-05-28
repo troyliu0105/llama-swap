@@ -39,7 +39,18 @@ func convertOpenAIStreamToResponses(data []byte) ([]byte, error) {
 
 	choices, _ := chunk["choices"].([]any)
 	if len(choices) == 0 {
-		// Usage chunk or similar, skip
+		if usage, ok := chunk["usage"].(map[string]any); ok && usage != nil {
+			return json.Marshal(map[string]any{
+				"type":            "response.completed",
+				"sequence_number": 0,
+				"response": map[string]any{
+					"id":     prefixID(chunk["id"], "resp_"),
+					"status": "completed",
+					"model":  chunk["model"],
+					"usage":  convertOpenAIUsageToResponses(usage),
+				},
+			})
+		}
 		return nil, nil
 	}
 
@@ -254,8 +265,11 @@ func convertResponsesStreamToOpenAI(data []byte) ([]byte, error) {
 		return nil, nil
 
 	case "response.completed", "response.incomplete":
-		// Send final chunk with finish_reason
-		return json.Marshal(map[string]any{
+		finishReason := "stop"
+		if evtType == "response.incomplete" {
+			finishReason = "length"
+		}
+		finalChunk := map[string]any{
 			"id":      "chatcmpl-protocol",
 			"object":  "chat.completion.chunk",
 			"created": time.Now().Unix(),
@@ -263,10 +277,30 @@ func convertResponsesStreamToOpenAI(data []byte) ([]byte, error) {
 				map[string]any{
 					"index":         0,
 					"delta":         map[string]any{},
-					"finish_reason": "stop",
+					"finish_reason": finishReason,
 				},
 			},
-		})
+		}
+		response, _ := evt["response"].(map[string]any)
+		if response == nil {
+			return json.Marshal(finalChunk)
+		}
+		copyFields(finalChunk, response, "model")
+		usage, _ := response["usage"].(map[string]any)
+		if usage == nil {
+			return json.Marshal(finalChunk)
+		}
+		usageChunk := map[string]any{
+			"id":      finalChunk["id"],
+			"object":  "chat.completion.chunk",
+			"created": finalChunk["created"],
+			"model":   finalChunk["model"],
+			"choices": []any{},
+			"usage":   convertResponsesUsageToOpenAI(usage),
+		}
+		finalBytes, _ := json.Marshal(finalChunk)
+		usageBytes, _ := json.Marshal(usageChunk)
+		return []byte(string(finalBytes) + "\n" + string(usageBytes)), nil
 
 	case "response.created", "response.in_progress", "response.queued",
 		"response.output_item.added", "response.output_item.done",
@@ -359,7 +393,6 @@ func convertAnthropicStreamToOpenAI(data []byte) ([]byte, error) {
 		}
 
 	case "message_delta":
-		// Contains stop_reason
 		delta, _ := evt["delta"].(map[string]any)
 		if delta == nil {
 			return nil, nil
@@ -374,7 +407,7 @@ func convertAnthropicStreamToOpenAI(data []byte) ([]byte, error) {
 		case "tool_use":
 			finishReason = "tool_calls"
 		}
-		return json.Marshal(map[string]any{
+		finalChunk := map[string]any{
 			"id":      "chatcmpl-protocol",
 			"object":  "chat.completion.chunk",
 			"created": time.Now().Unix(),
@@ -385,7 +418,21 @@ func convertAnthropicStreamToOpenAI(data []byte) ([]byte, error) {
 					"finish_reason": finishReason,
 				},
 			},
-		})
+		}
+		usage, _ := evt["usage"].(map[string]any)
+		if usage == nil {
+			return json.Marshal(finalChunk)
+		}
+		usageChunk := map[string]any{
+			"id":      finalChunk["id"],
+			"object":  "chat.completion.chunk",
+			"created": finalChunk["created"],
+			"choices": []any{},
+			"usage":   convertAnthropicUsageToOpenAI(usage),
+		}
+		finalBytes, _ := json.Marshal(finalChunk)
+		usageBytes, _ := json.Marshal(usageChunk)
+		return []byte(string(finalBytes) + "\n" + string(usageBytes)), nil
 
 	case "content_block_start":
 		// Check if it's a tool_use block start
@@ -473,6 +520,16 @@ func convertOpenAIStreamToAnthropic(data []byte) ([]byte, error) {
 
 	choices, _ := chunk["choices"].([]any)
 	if len(choices) == 0 {
+		if usage, ok := chunk["usage"].(map[string]any); ok && usage != nil {
+			return json.Marshal(map[string]any{
+				"type": "message_delta",
+				"delta": map[string]any{
+					"stop_reason":   "end_turn",
+					"stop_sequence": nil,
+				},
+				"usage": convertOpenAIUsageToAnthropic(usage),
+			})
+		}
 		return nil, nil
 	}
 
