@@ -21,7 +21,7 @@ import (
 //   data: {"type":"response.completed",...}
 // ---------------------------------------------------------------------------
 
-func convertOpenAIStreamToResponses(data []byte) ([]byte, error) {
+func convertOpenAIStreamToResponses(c *Converter, data []byte) ([]byte, error) {
 	if string(data) == "[DONE]" {
 		return json.Marshal(map[string]any{
 			"type":            "response.completed",
@@ -62,80 +62,65 @@ func convertOpenAIStreamToResponses(data []byte) ([]byte, error) {
 	delta, _ := choice["delta"].(map[string]any)
 	finishReason, _ := choice["finish_reason"].(string)
 
-	// First chunk with role → response.created + in_progress + output_item.added + content_part.added
+	if delta == nil && finishReason == "" {
+		return nil, nil
+	}
+
+	// Some providers include usage in the finish chunk alongside choices.
+	chunkUsage, _ := chunk["usage"].(map[string]any)
+
 	if delta == nil {
+		// No delta, only finish reason
+		if finishReason != "" {
+			return emitResponsesEndEvents(chunk, chunkUsage), nil
+		}
 		return nil, nil
 	}
 
 	_, hasRole := delta["role"]
 	content, hasContent := delta["content"]
 	_, hasToolCalls := delta["tool_calls"]
+	reasoningContent, hasReasoning := delta["reasoning_content"]
 
-	if hasRole && !hasContent {
-		// Start events
-		var events []map[string]any
-		events = append(events, map[string]any{
-			"type":            "response.created",
+	// Accumulate result lines (may combine start + content or end events)
+	var result []string
+
+	// Emit start events exactly once, on the first chunk that carries role.
+	// Providers like zhipu include role in every chunk; we only emit start
+	// events on the very first one.
+	if !c.streamStarted && hasRole {
+		c.streamStarted = true
+		result = append(result, responsesStartEventsJSON(chunk)...)
+		// If this chunk also carries content, continue processing below.
+	}
+
+	if hasReasoning {
+		reasoningStr, _ := reasoningContent.(string)
+		b, _ := json.Marshal(map[string]any{
+			"type":            "response.output_text.delta",
 			"sequence_number": 0,
-			"response": map[string]any{
-				"id":     prefixID(chunk["id"], "resp_"),
-				"status": "in_progress",
-				"model":  chunk["model"],
-			},
-		})
-		events = append(events, map[string]any{
-			"type":            "response.in_progress",
-			"sequence_number": 1,
-			"response": map[string]any{
-				"id":     prefixID(chunk["id"], "resp_"),
-				"status": "in_progress",
-			},
-		})
-		events = append(events, map[string]any{
-			"type":            "response.output_item.added",
-			"sequence_number": 2,
-			"output_index":    0,
-			"item": map[string]any{
-				"type":    "message",
-				"role":    "assistant",
-				"content": []any{},
-			},
-		})
-		events = append(events, map[string]any{
-			"type":            "response.content_part.added",
-			"sequence_number": 3,
 			"output_index":    0,
 			"content_index":   0,
-			"part": map[string]any{
-				"type": "output_text",
-				"text": "",
-			},
+			"delta":           reasoningStr,
 		})
-
-		// Combine into a single SSE data with newlines
-		var lines []string
-		for _, evt := range events {
-			b, _ := json.Marshal(evt)
-			lines = append(lines, string(b))
-		}
-		return []byte(strings.Join(lines, "\n")), nil
+		result = append(result, string(b))
 	}
 
 	if hasContent {
 		contentStr, _ := content.(string)
-		return json.Marshal(map[string]any{
+		b, _ := json.Marshal(map[string]any{
 			"type":            "response.output_text.delta",
 			"sequence_number": 0,
 			"output_index":    0,
 			"content_index":   0,
 			"delta":           contentStr,
 		})
+		result = append(result, string(b))
 	}
 
 	if hasToolCalls {
 		// Convert tool call deltas
 		toolCallDeltas, _ := delta["tool_calls"].([]any)
-		var events []string
 		for _, tcd := range toolCallDeltas {
 			tcMap, ok := tcd.(map[string]any)
 			if !ok {
@@ -146,56 +131,130 @@ func convertOpenAIStreamToResponses(data []byte) ([]byte, error) {
 				continue
 			}
 			argsDelta, _ := fn["arguments"].(string)
-			evt := map[string]any{
+			b, _ := json.Marshal(map[string]any{
 				"type":            "response.function_call_arguments.delta",
 				"sequence_number": 0,
 				"output_index":    0,
 				"call_id":         tcMap["id"],
 				"delta":           argsDelta,
-			}
-			b, _ := json.Marshal(evt)
-			events = append(events, string(b))
+			})
+			result = append(result, string(b))
 		}
-		if len(events) > 0 {
-			return []byte(strings.Join(events, "\n")), nil
-		}
-		return nil, nil
 	}
 
 	if finishReason != "" {
-		// End events
-		var events []string
+		result = append(result, responsesEndEventsJSON(chunk, chunkUsage)...)
+	}
 
-		// content_part.done
-		b, _ := json.Marshal(map[string]any{
-			"type":            "response.content_part.done",
+	if len(result) == 0 {
+		return nil, nil
+	}
+	return []byte(strings.Join(result, "\n")), nil
+}
+
+// responsesStartEventsJSON returns the four lifecycle events that begin a
+// Responses API stream: created, in_progress, output_item.added, content_part.added.
+func responsesStartEventsJSON(chunk map[string]any) []string {
+	events := []map[string]any{
+		{
+			"type":            "response.created",
 			"sequence_number": 0,
-			"output_index":    0,
-			"content_index":   0,
-			"part": map[string]any{
-				"type": "output_text",
-				"text": "",
+			"response": map[string]any{
+				"id":     prefixID(chunk["id"], "resp_"),
+				"status": "in_progress",
+				"model":  chunk["model"],
 			},
-		})
-		events = append(events, string(b))
-
-		// output_item.done
-		b, _ = json.Marshal(map[string]any{
-			"type":            "response.output_item.done",
-			"sequence_number": 0,
+		},
+		{
+			"type":            "response.in_progress",
+			"sequence_number": 1,
+			"response": map[string]any{
+				"id":     prefixID(chunk["id"], "resp_"),
+				"status": "in_progress",
+			},
+		},
+		{
+			"type":            "response.output_item.added",
+			"sequence_number": 2,
 			"output_index":    0,
 			"item": map[string]any{
 				"type":    "message",
 				"role":    "assistant",
 				"content": []any{},
 			},
-		})
-		events = append(events, string(b))
-
-		return []byte(strings.Join(events, "\n")), nil
+		},
+		{
+			"type":            "response.content_part.added",
+			"sequence_number": 3,
+			"output_index":    0,
+			"content_index":   0,
+			"part": map[string]any{
+				"type": "output_text",
+				"text": "",
+			},
+		},
 	}
 
-	return nil, nil
+	var lines []string
+	for _, evt := range events {
+		b, _ := json.Marshal(evt)
+		lines = append(lines, string(b))
+	}
+	return lines
+}
+
+// emitResponsesEndEvents builds the end-of-stream events: content_part.done,
+// output_item.done, and optionally response.completed (when usage is present).
+func emitResponsesEndEvents(chunk map[string]any, usage map[string]any) []byte {
+	return []byte(strings.Join(responsesEndEventsJSON(chunk, usage), "\n"))
+}
+
+// responsesEndEventsJSON returns the end-of-stream events as JSON lines.
+func responsesEndEventsJSON(chunk map[string]any, usage map[string]any) []string {
+	var events []string
+
+	// content_part.done
+	b, _ := json.Marshal(map[string]any{
+		"type":            "response.content_part.done",
+		"sequence_number": 0,
+		"output_index":    0,
+		"content_index":   0,
+		"part": map[string]any{
+			"type": "output_text",
+			"text": "",
+		},
+	})
+	events = append(events, string(b))
+
+	// output_item.done
+	b, _ = json.Marshal(map[string]any{
+		"type":            "response.output_item.done",
+		"sequence_number": 0,
+		"output_index":    0,
+		"item": map[string]any{
+			"type":    "message",
+			"role":    "assistant",
+			"content": []any{},
+		},
+	})
+	events = append(events, string(b))
+
+	// response.completed with usage (if available)
+	if usage != nil {
+		b, _ = json.Marshal(map[string]any{
+			"type":            "response.completed",
+			"sequence_number": 0,
+			"response": map[string]any{
+				"id":     prefixID(chunk["id"], "resp_"),
+				"status": "completed",
+				"model":  chunk["model"],
+				"usage":  convertOpenAIUsageToResponses(usage),
+			},
+		})
+		events = append(events, string(b))
+	}
+
+	return events
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +263,7 @@ func convertOpenAIStreamToResponses(data []byte) ([]byte, error) {
 // Converts individual response events into chat.completion.chunk objects.
 // ---------------------------------------------------------------------------
 
-func convertResponsesStreamToOpenAI(data []byte) ([]byte, error) {
+func convertResponsesStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 	var evt map[string]any
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return data, nil
@@ -328,7 +387,7 @@ func convertResponsesStreamToOpenAI(data []byte) ([]byte, error) {
 //   data: {"type":"message_stop"}
 // ---------------------------------------------------------------------------
 
-func convertAnthropicStreamToOpenAI(data []byte) ([]byte, error) {
+func convertAnthropicStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 	var evt map[string]any
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return data, nil
@@ -506,7 +565,7 @@ func convertAnthropicStreamToOpenAI(data []byte) ([]byte, error) {
 // OpenAI stream → Anthropic stream
 // ---------------------------------------------------------------------------
 
-func convertOpenAIStreamToAnthropic(data []byte) ([]byte, error) {
+func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 	if string(data) == "[DONE]" {
 		return json.Marshal(map[string]any{
 			"type": "message_stop",
@@ -545,9 +604,10 @@ func convertOpenAIStreamToAnthropic(data []byte) ([]byte, error) {
 		return nil, nil
 	}
 
-	// First chunk with role → message_start
+	// First chunk with role → message_start (emit exactly once)
 	if delta != nil {
-		if _, hasRole := delta["role"]; hasRole {
+		if _, hasRole := delta["role"]; hasRole && !c.streamStarted {
+			c.streamStarted = true
 			return json.Marshal(map[string]any{
 				"type": "message_start",
 				"message": map[string]any{
@@ -639,25 +699,25 @@ func convertOpenAIStreamToAnthropic(data []byte) ([]byte, error) {
 // Responses stream → Anthropic stream
 // ---------------------------------------------------------------------------
 
-func convertResponsesStreamToAnthropic(data []byte) ([]byte, error) {
+func convertResponsesStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 	// Convert via OpenAI as intermediate
-	openaiData, err := convertResponsesStreamToOpenAI(data)
+	openaiData, err := convertResponsesStreamToOpenAI(c, data)
 	if err != nil {
 		return nil, err
 	}
 	if openaiData == nil {
 		return nil, nil
 	}
-	return convertOpenAIStreamToAnthropic(openaiData)
+	return convertOpenAIStreamToAnthropic(c, openaiData)
 }
 
 // ---------------------------------------------------------------------------
 // Anthropic stream → Responses stream
 // ---------------------------------------------------------------------------
 
-func convertAnthropicStreamToResponses(data []byte) ([]byte, error) {
+func convertAnthropicStreamToResponses(c *Converter, data []byte) ([]byte, error) {
 	// Convert via OpenAI as intermediate
-	openaiData, err := convertAnthropicStreamToOpenAI(data)
+	openaiData, err := convertAnthropicStreamToOpenAI(c, data)
 	if err != nil {
 		return nil, err
 	}
@@ -665,9 +725,9 @@ func convertAnthropicStreamToResponses(data []byte) ([]byte, error) {
 		return nil, nil
 	}
 	if string(openaiData) == "[DONE]" {
-		return convertOpenAIStreamToResponses(openaiData)
+		return convertOpenAIStreamToResponses(c, openaiData)
 	}
-	return convertOpenAIStreamToResponses(openaiData)
+	return convertOpenAIStreamToResponses(c, openaiData)
 }
 
 // FormatStreamEvents takes raw SSE data lines and converts them.

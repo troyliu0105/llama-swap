@@ -65,7 +65,7 @@ func (c *Converter) ConvertStreamEvent(data []byte) ([]byte, error) {
 	if !ok {
 		return data, nil
 	}
-	return convertFn(data)
+	return convertFn(c, data)
 }
 
 // convertKey identifies a conversion direction.
@@ -92,8 +92,13 @@ var responseMapConverters = map[convertKey]func(map[string]any) (map[string]any,
 	{FormatAnthropic, FormatResponses}: convertAnthropicResponseMapToResponses,
 }
 
+// streamConverterFunc is the signature for streaming event converter functions.
+// The *Converter parameter allows stateful converters (e.g. tracking whether
+// start events have been emitted).
+type streamConverterFunc = func(*Converter, []byte) ([]byte, error)
+
 // streamConverters maps conversion directions to streaming event converters.
-var streamConverters = map[convertKey]func([]byte) ([]byte, error){
+var streamConverters = map[convertKey]streamConverterFunc{
 	{FormatOpenAI, FormatResponses}:    convertOpenAIStreamToResponses,
 	{FormatResponses, FormatOpenAI}:    convertResponsesStreamToOpenAI,
 	{FormatOpenAI, FormatAnthropic}:    convertOpenAIStreamToAnthropic,

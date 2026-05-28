@@ -555,7 +555,7 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 	if pp.convertProtocol && pp.upstreamFormat != protocol.FormatUnknown {
 		clientFormat := protocol.DetectClientFormat(request.URL.Path)
 		if protocol.NeedsConversion(clientFormat, pp.upstreamFormat) {
-			converter := pp.converters[clientFormat]
+			converter := pp.converters[clientFormat].Clone()
 			if converter == nil {
 				peerLog("[PEER ERROR] %s | %s | protocol_convert_error | no converter for %s→%s\n",
 					getPeerReqID(request), modelID, clientFormat, pp.upstreamFormat)

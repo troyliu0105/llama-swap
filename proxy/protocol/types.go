@@ -29,6 +29,19 @@ func ParseFormat(s string) Format {
 type Converter struct {
 	From Format
 	To   Format
+
+	// streamStarted tracks whether stream lifecycle start events have been
+	// emitted. Used by OpenAI→Responses and OpenAI→Anthropic conversions to
+	// avoid emitting duplicate start events when the upstream includes a
+	// role field in every chunk.
+	streamStarted bool
+}
+
+// Clone returns a shallow copy of the Converter with stream state reset.
+// Each request must use its own clone so stream state is not shared across
+// concurrent requests.
+func (c *Converter) Clone() *Converter {
+	return &Converter{From: c.From, To: c.To}
 }
 
 // NeedsConversion returns true when client and upstream formats differ.

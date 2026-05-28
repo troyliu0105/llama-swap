@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -430,7 +431,7 @@ func TestRoundTripResponsesOpenAI(t *testing.T) {
 func TestConvertOpenAIStreamToResponses(t *testing.T) {
 	// Role chunk
 	roleChunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`
-	result, err := convertOpenAIStreamToResponses([]byte(roleChunk))
+	result, err := convertOpenAIStreamToResponses(&Converter{}, []byte(roleChunk))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -444,7 +445,7 @@ func TestConvertOpenAIStreamToResponses(t *testing.T) {
 
 	// Content chunk
 	contentChunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}`
-	result, err = convertOpenAIStreamToResponses([]byte(contentChunk))
+	result, err = convertOpenAIStreamToResponses(&Converter{}, []byte(contentChunk))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -453,7 +454,7 @@ func TestConvertOpenAIStreamToResponses(t *testing.T) {
 	}
 
 	// [DONE] marker
-	result, err = convertOpenAIStreamToResponses([]byte("[DONE]"))
+	result, err = convertOpenAIStreamToResponses(&Converter{}, []byte("[DONE]"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -465,7 +466,7 @@ func TestConvertOpenAIStreamToResponses(t *testing.T) {
 func TestConvertAnthropicStreamToOpenAI(t *testing.T) {
 	// message_start
 	startEvent := `{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-3","usage":{"input_tokens":10,"output_tokens":0}}}`
-	result, err := convertAnthropicStreamToOpenAI([]byte(startEvent))
+	result, err := convertAnthropicStreamToOpenAI(nil, []byte(startEvent))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -475,7 +476,7 @@ func TestConvertAnthropicStreamToOpenAI(t *testing.T) {
 
 	// content_block_delta with text
 	deltaEvent := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}`
-	result, err = convertAnthropicStreamToOpenAI([]byte(deltaEvent))
+	result, err = convertAnthropicStreamToOpenAI(nil, []byte(deltaEvent))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -491,7 +492,7 @@ func TestConvertAnthropicStreamToOpenAI(t *testing.T) {
 
 	// message_stop → [DONE]
 	stopEvent := `{"type":"message_stop"}`
-	result, err = convertAnthropicStreamToOpenAI([]byte(stopEvent))
+	result, err = convertAnthropicStreamToOpenAI(nil, []byte(stopEvent))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -503,7 +504,7 @@ func TestConvertAnthropicStreamToOpenAI(t *testing.T) {
 func TestConvertResponsesStreamToOpenAI(t *testing.T) {
 	// text delta
 	deltaEvent := `{"type":"response.output_text.delta","delta":"Hello","item_id":"msg_001","output_index":0,"content_index":0}`
-	result, err := convertResponsesStreamToOpenAI([]byte(deltaEvent))
+	result, err := convertResponsesStreamToOpenAI(nil, []byte(deltaEvent))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -513,7 +514,7 @@ func TestConvertResponsesStreamToOpenAI(t *testing.T) {
 
 	// completed → final chunk
 	completedEvent := `{"type":"response.completed","response":{"id":"resp_123","status":"completed"}}`
-	result, err = convertResponsesStreamToOpenAI([]byte(completedEvent))
+	result, err = convertResponsesStreamToOpenAI(nil, []byte(completedEvent))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -834,7 +835,7 @@ func TestSchemaMappingPreservesUsageCacheDetails(t *testing.T) {
 
 func TestSchemaMappingPreservesStreamingUsage(t *testing.T) {
 	openAIChunk := `{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":25,"total_tokens":125,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":7}}}`
-	converted, err := convertOpenAIStreamToResponses([]byte(openAIChunk))
+	converted, err := convertOpenAIStreamToResponses(&Converter{}, []byte(openAIChunk))
 	if err != nil {
 		t.Fatalf("openai stream→responses: %v", err)
 	}
@@ -979,7 +980,7 @@ func containsSubstring(s, substr string) bool {
 
 func TestConvertResponsesStreamToOpenAI_PassesThroughUnknownEvent(t *testing.T) {
 	unknownEvt := `{"type":"custom.vendor_event","data":"something","sequence_number":42}`
-	result, err := convertResponsesStreamToOpenAI([]byte(unknownEvt))
+	result, err := convertResponsesStreamToOpenAI(nil, []byte(unknownEvt))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1013,7 +1014,7 @@ func TestConvertResponsesStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
 	} {
 		t.Run(evtType, func(t *testing.T) {
 			evt := `{"type":"` + evtType + `"}`
-			result, err := convertResponsesStreamToOpenAI([]byte(evt))
+			result, err := convertResponsesStreamToOpenAI(nil, []byte(evt))
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -1026,7 +1027,7 @@ func TestConvertResponsesStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
 
 func TestConvertAnthropicStreamToOpenAI_PassesThroughUnknownEvent(t *testing.T) {
 	unknownEvt := `{"type":"custom_event","data":"payload"}`
-	result, err := convertAnthropicStreamToOpenAI([]byte(unknownEvt))
+	result, err := convertAnthropicStreamToOpenAI(nil, []byte(unknownEvt))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1049,7 +1050,7 @@ func TestConvertAnthropicStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
 			if evtType == "thinking_delta" {
 				evt = `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}`
 			}
-			result, err := convertAnthropicStreamToOpenAI([]byte(evt))
+			result, err := convertAnthropicStreamToOpenAI(nil, []byte(evt))
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -1062,7 +1063,7 @@ func TestConvertAnthropicStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
 
 func TestConvertOpenAIStreamToResponses_PassesThroughNoChoicesChunk(t *testing.T) {
 	chunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[]}`
-	result, err := convertOpenAIStreamToResponses([]byte(chunk))
+	result, err := convertOpenAIStreamToResponses(&Converter{}, []byte(chunk))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1076,7 +1077,7 @@ func TestConvertOpenAIStreamToResponses_PassesThroughNoChoicesChunk(t *testing.T
 
 func TestConvertOpenAIStreamToAnthropic_PassesThroughNoChoicesChunk(t *testing.T) {
 	chunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[]}`
-	result, err := convertOpenAIStreamToAnthropic([]byte(chunk))
+	result, err := convertOpenAIStreamToAnthropic(&Converter{}, []byte(chunk))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1422,5 +1423,83 @@ func TestMalformedToolMissingFunction(t *testing.T) {
 	}
 	if !containsSubstring(err.Error(), "non-object function") {
 		t.Errorf("error = %q, want mention of non-object function", err.Error())
+	}
+}
+
+func TestConvertOpenAIStreamToResponses_ReasoningContent(t *testing.T) {
+	// Simulate zhipu-style stream where every chunk includes role: "assistant"
+	// along with reasoning_content. Start events must be emitted exactly once.
+	c := &Converter{From: FormatOpenAI, To: FormatResponses}
+
+	// Chunk 1: role + reasoning_content (first chunk)
+	chunk1 := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Let me think"},"finish_reason":null}]}`
+	result, err := convertOpenAIStreamToResponses(c, []byte(chunk1))
+	if err != nil {
+		t.Fatalf("chunk1: unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("chunk1: expected non-nil result")
+	}
+	// Must contain start events AND reasoning delta
+	if !contains(result, "response.created") {
+		t.Errorf("chunk1: missing response.created: %s", string(result))
+	}
+	if !contains(result, "response.output_text.delta") {
+		t.Errorf("chunk1: missing output_text.delta for reasoning: %s", string(result))
+	}
+	if !contains(result, "Let me think") {
+		t.Errorf("chunk1: missing reasoning content: %s", string(result))
+	}
+	// Count start events — must be exactly one of each
+	if count := strings.Count(string(result), "response.created"); count != 1 {
+		t.Errorf("chunk1: expected 1 response.created, got %d", count)
+	}
+
+	// Chunk 2: role + reasoning_content (subsequent — no start events)
+	chunk2 := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" about this"},"finish_reason":null}]}`
+	result, err = convertOpenAIStreamToResponses(c, []byte(chunk2))
+	if err != nil {
+		t.Fatalf("chunk2: unexpected error: %v", err)
+	}
+	if contains(result, "response.created") {
+		t.Errorf("chunk2: unexpected response.created (should not repeat): %s", string(result))
+	}
+	if !contains(result, "response.output_text.delta") {
+		t.Errorf("chunk2: missing output_text.delta: %s", string(result))
+	}
+	if !contains(result, " about this") {
+		t.Errorf("chunk2: missing reasoning content: %s", string(result))
+	}
+
+	// Chunk 3: role + content (actual output starts)
+	chunk3 := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello!"},"finish_reason":null}]}`
+	result, err = convertOpenAIStreamToResponses(c, []byte(chunk3))
+	if err != nil {
+		t.Fatalf("chunk3: unexpected error: %v", err)
+	}
+	if contains(result, "response.created") {
+		t.Errorf("chunk3: unexpected response.created: %s", string(result))
+	}
+	if !contains(result, "Hello!") {
+		t.Errorf("chunk3: missing content: %s", string(result))
+	}
+
+	// Chunk 4: finish with usage
+	chunk4 := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`
+	result, err = convertOpenAIStreamToResponses(c, []byte(chunk4))
+	if err != nil {
+		t.Fatalf("chunk4: unexpected error: %v", err)
+	}
+	if !contains(result, "response.content_part.done") {
+		t.Errorf("chunk4: missing content_part.done: %s", string(result))
+	}
+	if !contains(result, "response.output_item.done") {
+		t.Errorf("chunk4: missing output_item.done: %s", string(result))
+	}
+	if !contains(result, "response.completed") {
+		t.Errorf("chunk4: missing response.completed (usage should trigger it): %s", string(result))
+	}
+	if !contains(result, "input_tokens") {
+		t.Errorf("chunk4: missing usage data in response.completed: %s", string(result))
 	}
 }
