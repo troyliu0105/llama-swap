@@ -604,11 +604,17 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 		return nil, nil
 	}
 
+	var events []string
+	appendEvent := func(event map[string]any) {
+		b, _ := json.Marshal(event)
+		events = append(events, string(b))
+	}
+
 	// First chunk with role → message_start (emit exactly once)
 	if delta != nil {
 		if _, hasRole := delta["role"]; hasRole && !c.streamStarted {
 			c.streamStarted = true
-			return json.Marshal(map[string]any{
+			appendEvent(map[string]any{
 				"type": "message_start",
 				"message": map[string]any{
 					"id":      prefixID(chunk["id"], "msg_"),
@@ -621,11 +627,55 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 			})
 		}
 
-		// Text content delta
-		if content, ok := delta["content"].(string); ok {
-			return json.Marshal(map[string]any{
+		// Thinking content delta
+		if reasoningContent, ok := delta["reasoning_content"].(string); ok && reasoningContent != "" {
+			if !c.thinkingBlockStarted {
+				c.thinkingBlockStarted = true
+				appendEvent(map[string]any{
+					"type":  "content_block_start",
+					"index": 0,
+					"content_block": map[string]any{
+						"type":     "thinking",
+						"thinking": "",
+					},
+				})
+			}
+			appendEvent(map[string]any{
 				"type":  "content_block_delta",
 				"index": 0,
+				"delta": map[string]any{
+					"type":     "thinking_delta",
+					"thinking": reasoningContent,
+				},
+			})
+		}
+
+		// Text content delta
+		if content, ok := delta["content"].(string); ok && content != "" {
+			textBlockIndex := 0
+			if c.thinkingBlockStarted {
+				textBlockIndex = 1
+			}
+			if !c.textBlockStarted {
+				if c.thinkingBlockStarted {
+					appendEvent(map[string]any{
+						"type":  "content_block_stop",
+						"index": 0,
+					})
+				}
+				c.textBlockStarted = true
+				appendEvent(map[string]any{
+					"type":  "content_block_start",
+					"index": textBlockIndex,
+					"content_block": map[string]any{
+						"type": "text",
+						"text": "",
+					},
+				})
+			}
+			appendEvent(map[string]any{
+				"type":  "content_block_delta",
+				"index": textBlockIndex,
 				"delta": map[string]any{
 					"type": "text_delta",
 					"text": content,
@@ -640,7 +690,7 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 				fn, _ := tcMap["function"].(map[string]any)
 				if fn != nil {
 					args, _ := fn["arguments"].(string)
-					return json.Marshal(map[string]any{
+					appendEvent(map[string]any{
 						"type":  "content_block_delta",
 						"index": 1,
 						"delta": map[string]any{
@@ -663,16 +713,28 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 			stopReason = "tool_use"
 		}
 
-		// content_block_stop + message_delta + message_stop
-		var events []string
+		if c.textBlockStarted {
+			textBlockIndex := 0
+			if c.thinkingBlockStarted {
+				textBlockIndex = 1
+			}
+			appendEvent(map[string]any{
+				"type":  "content_block_stop",
+				"index": textBlockIndex,
+			})
+		} else if c.thinkingBlockStarted {
+			appendEvent(map[string]any{
+				"type":  "content_block_stop",
+				"index": 0,
+			})
+		} else {
+			appendEvent(map[string]any{
+				"type":  "content_block_stop",
+				"index": 0,
+			})
+		}
 
-		b, _ := json.Marshal(map[string]any{
-			"type":  "content_block_stop",
-			"index": 0,
-		})
-		events = append(events, string(b))
-
-		b, _ = json.Marshal(map[string]any{
+		appendEvent(map[string]any{
 			"type": "message_delta",
 			"delta": map[string]any{
 				"stop_reason":   stopReason,
@@ -682,17 +744,16 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 				"output_tokens": 0,
 			},
 		})
-		events = append(events, string(b))
 
-		b, _ = json.Marshal(map[string]any{
+		appendEvent(map[string]any{
 			"type": "message_stop",
 		})
-		events = append(events, string(b))
-
-		return []byte(strings.Join(events, "\n")), nil
 	}
 
-	return nil, nil
+	if len(events) == 0 {
+		return nil, nil
+	}
+	return []byte(strings.Join(events, "\n")), nil
 }
 
 // ---------------------------------------------------------------------------

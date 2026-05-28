@@ -34,7 +34,9 @@ type Converter struct {
 	// emitted. Used by OpenAI→Responses and OpenAI→Anthropic conversions to
 	// avoid emitting duplicate start events when the upstream includes a
 	// role field in every chunk.
-	streamStarted bool
+	streamStarted        bool
+	thinkingBlockStarted bool
+	textBlockStarted     bool
 }
 
 // Clone returns a shallow copy of the Converter with stream state reset.

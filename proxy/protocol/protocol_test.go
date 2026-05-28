@@ -1089,6 +1089,121 @@ func TestConvertOpenAIStreamToAnthropic_PassesThroughNoChoicesChunk(t *testing.T
 	}
 }
 
+func TestConvertOpenAIStreamToAnthropic_ReasoningContent(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	appendEvents := func(label string, data []byte) {
+		t.Helper()
+		if data == nil {
+			t.Fatalf("%s: expected non-nil result", label)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var event map[string]any
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				t.Fatalf("%s: failed to unmarshal event %q: %v", label, line, err)
+			}
+			events = append(events, event)
+		}
+	}
+
+	chunk1 := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Let me think"},"finish_reason":null}]}`
+	result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk1))
+	if err != nil {
+		t.Fatalf("chunk1: unexpected error: %v", err)
+	}
+	appendEvents("chunk1", result)
+
+	chunk2 := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" about this"},"finish_reason":null}]}`
+	result, err = convertOpenAIStreamToAnthropic(c, []byte(chunk2))
+	if err != nil {
+		t.Fatalf("chunk2: unexpected error: %v", err)
+	}
+	appendEvents("chunk2", result)
+
+	chunk3 := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello!"},"finish_reason":null}]}`
+	result, err = convertOpenAIStreamToAnthropic(c, []byte(chunk3))
+	if err != nil {
+		t.Fatalf("chunk3: unexpected error: %v", err)
+	}
+	appendEvents("chunk3", result)
+
+	chunk4 := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`
+	result, err = convertOpenAIStreamToAnthropic(c, []byte(chunk4))
+	if err != nil {
+		t.Fatalf("chunk4: unexpected error: %v", err)
+	}
+	appendEvents("chunk4", result)
+
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("expected %d events, got %d: %#v", len(wantTypes), len(events), events)
+	}
+	for i, wantType := range wantTypes {
+		if events[i]["type"] != wantType {
+			t.Fatalf("event %d type = %v, want %s: %#v", i, events[i]["type"], wantType, events[i])
+		}
+	}
+	if count := strings.Count(string(result), "message_start"); count != 0 {
+		t.Fatalf("finish chunk unexpectedly repeated message_start: %s", string(result))
+	}
+
+	thinkingStart, _ := events[1]["content_block"].(map[string]any)
+	if events[1]["index"] != float64(0) || thinkingStart["type"] != "thinking" || thinkingStart["thinking"] != "" {
+		t.Errorf("thinking start event mismatch: %#v", events[1])
+	}
+	firstThinkingDelta, _ := events[2]["delta"].(map[string]any)
+	if events[2]["index"] != float64(0) || firstThinkingDelta["type"] != "thinking_delta" || firstThinkingDelta["thinking"] != "Let me think" {
+		t.Errorf("first thinking delta mismatch: %#v", events[2])
+	}
+	secondThinkingDelta, _ := events[3]["delta"].(map[string]any)
+	if events[3]["index"] != float64(0) || secondThinkingDelta["type"] != "thinking_delta" || secondThinkingDelta["thinking"] != " about this" {
+		t.Errorf("second thinking delta mismatch: %#v", events[3])
+	}
+	if events[4]["index"] != float64(0) {
+		t.Errorf("thinking stop event mismatch: %#v", events[4])
+	}
+
+	textStart, _ := events[5]["content_block"].(map[string]any)
+	if events[5]["index"] != float64(1) || textStart["type"] != "text" || textStart["text"] != "" {
+		t.Errorf("text start event mismatch: %#v", events[5])
+	}
+	textDelta, _ := events[6]["delta"].(map[string]any)
+	if events[6]["index"] != float64(1) || textDelta["type"] != "text_delta" || textDelta["text"] != "Hello!" {
+		t.Errorf("text delta mismatch: %#v", events[6])
+	}
+	if events[7]["index"] != float64(1) {
+		t.Errorf("text stop event mismatch: %#v", events[7])
+	}
+	messageDelta, _ := events[8]["delta"].(map[string]any)
+	if messageDelta["stop_reason"] != "end_turn" {
+		t.Errorf("message_delta stop_reason = %v, want end_turn: %#v", messageDelta["stop_reason"], events[8])
+	}
+
+	allEventsJSON, _ := json.Marshal(events)
+	if count := strings.Count(string(allEventsJSON), "message_start"); count != 1 {
+		t.Errorf("expected exactly 1 message_start, got %d: %s", count, string(allEventsJSON))
+	}
+	if count := strings.Count(string(allEventsJSON), "thinking_delta"); count != 2 {
+		t.Errorf("expected exactly 2 thinking_delta events, got %d: %s", count, string(allEventsJSON))
+	}
+}
+
 func TestTransformingWriterPreservesSSEMetadataForConvertedData(t *testing.T) {
 	// Client wants Responses format, upstream is OpenAI.
 	conv, err := NewConverter(FormatResponses, FormatOpenAI)
