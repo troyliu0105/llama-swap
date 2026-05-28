@@ -760,7 +760,11 @@ func TestSchemaMappingPreservesContentCacheAndMedia(t *testing.T) {
 		map[string]any{"type": "input_text", "text": "cache me", "cache_control": map[string]any{"type": "ephemeral"}},
 		map[string]any{"type": "input_image", "image_data": "abc", "media_type": "image/webp", "detail": "low"},
 	}
-	openaiContent := convertResponsesContentToOpenAI(responsesContent).([]any)
+	openaiContentAny, err := convertResponsesContentToOpenAI(responsesContent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	openaiContent := openaiContentAny.([]any)
 	text := openaiContent[0].(map[string]any)
 	if text["cache_control"].(map[string]any)["type"] != "ephemeral" {
 		t.Fatalf("cache_control was not preserved: %v", text)
@@ -771,7 +775,11 @@ func TestSchemaMappingPreservesContentCacheAndMedia(t *testing.T) {
 	}
 
 	anthropicContent := []any{map[string]any{"type": "text", "text": "hello", "cache_control": map[string]any{"type": "ephemeral"}}}
-	openaiContent = anthropicContentToOpenAI(anthropicContent).([]any)
+	openaiContentAny, err = anthropicContentToOpenAI(anthropicContent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	openaiContent = openaiContentAny.([]any)
 	text = openaiContent[0].(map[string]any)
 	if text["cache_control"].(map[string]any)["type"] != "ephemeral" {
 		t.Fatalf("Anthropic cache_control was not preserved: %v", text)
@@ -963,4 +971,456 @@ func containsSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Hardening regression tests
+// ---------------------------------------------------------------------------
+
+func TestConvertResponsesStreamToOpenAI_PassesThroughUnknownEvent(t *testing.T) {
+	unknownEvt := `{"type":"custom.vendor_event","data":"something","sequence_number":42}`
+	result, err := convertResponsesStreamToOpenAI([]byte(unknownEvt))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("unknown Responses event was dropped, expected pass-through")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("pass-through data is not valid JSON: %v", err)
+	}
+	if parsed["type"] != "custom.vendor_event" {
+		t.Errorf("pass-through modified the event: %s", string(result))
+	}
+}
+
+func TestConvertResponsesStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
+	for _, evtType := range []string{
+		"response.output_text.done",
+		"response.function_call_arguments.done",
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.content_part.added",
+		"response.content_part.done",
+		"response.output_item.done",
+		"response.refusal.delta",
+		"response.refusal.done",
+		"response.reasoning_text.delta",
+		"response.reasoning_text.done",
+		"response.queued",
+	} {
+		t.Run(evtType, func(t *testing.T) {
+			evt := `{"type":"` + evtType + `"}`
+			result, err := convertResponsesStreamToOpenAI([]byte(evt))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != nil {
+				t.Errorf("expected nil for known no-op event %s, got: %s", evtType, string(result))
+			}
+		})
+	}
+}
+
+func TestConvertAnthropicStreamToOpenAI_PassesThroughUnknownEvent(t *testing.T) {
+	unknownEvt := `{"type":"custom_event","data":"payload"}`
+	result, err := convertAnthropicStreamToOpenAI([]byte(unknownEvt))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("unknown Anthropic event was dropped, expected pass-through")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("pass-through data is not valid JSON: %v", err)
+	}
+	if parsed["type"] != "custom_event" {
+		t.Errorf("pass-through modified the event: %s", string(result))
+	}
+}
+
+func TestConvertAnthropicStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
+	for _, evtType := range []string{"ping", "content_block_stop", "thinking_delta"} {
+		t.Run(evtType, func(t *testing.T) {
+			evt := `{"type":"` + evtType + `"}`
+			if evtType == "thinking_delta" {
+				evt = `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}`
+			}
+			result, err := convertAnthropicStreamToOpenAI([]byte(evt))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != nil {
+				t.Errorf("expected nil for known no-op event %s, got: %s", evtType, string(result))
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIStreamToResponses_PassesThroughNoChoicesChunk(t *testing.T) {
+	chunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[]}`
+	result, err := convertOpenAIStreamToResponses([]byte(chunk))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("parseable chunk with empty choices was dropped, expected pass-through")
+	}
+	if string(result) != chunk {
+		t.Errorf("pass-through modified the chunk: %s", string(result))
+	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_PassesThroughNoChoicesChunk(t *testing.T) {
+	chunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[]}`
+	result, err := convertOpenAIStreamToAnthropic([]byte(chunk))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("parseable chunk with empty choices was dropped, expected pass-through")
+	}
+	if string(result) != chunk {
+		t.Errorf("pass-through modified the chunk: %s", string(result))
+	}
+}
+
+func TestTransformingWriterPreservesSSEMetadataForConvertedData(t *testing.T) {
+	// Client wants Responses format, upstream is OpenAI.
+	conv, err := NewConverter(FormatResponses, FormatOpenAI)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+
+	// Upstream sends OpenAI SSE with event type + data lines
+	sse := "event: message_start\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"
+	w.Write([]byte(sse))
+	w.Flush()
+
+	body := r.Body.String()
+	// The data line should produce converted output with response.created
+	if !containsSubstring(body, "response.created") {
+		t.Fatalf("expected converted content in output, got: %q", body)
+	}
+	// The event: metadata line should be preserved
+	if !containsSubstring(body, "event:") {
+		t.Fatalf("expected SSE event metadata preserved, got: %q", body)
+	}
+}
+
+func TestTransformingWriterAcceptsDataLineWithoutSpace(t *testing.T) {
+	// Client wants Responses format, upstream is OpenAI.
+	conv, err := NewConverter(FormatResponses, FormatOpenAI)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+
+	// "data:" without trailing space (valid per SSE spec)
+	sse := "data:{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n"
+	w.Write([]byte(sse))
+	w.Flush()
+
+	body := r.Body.String()
+	if !containsSubstring(body, "response.output_text.delta") {
+		t.Fatalf("expected conversion of data: without space, got: %q", body)
+	}
+}
+
+func TestTransformingWriterReturnsBadGatewayOnConversionError(t *testing.T) {
+	conv := &Converter{From: FormatOpenAI, To: FormatUnknown}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	_, err := w.Write([]byte(`{"id":"resp_1","object":"response","output":[]}`))
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	w.Flush()
+
+	if r.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d with body %q", r.Code, r.Body.String())
+	}
+	if !containsSubstring(r.Body.String(), "response conversion failed") {
+		t.Fatalf("expected conversion error body, got %q", r.Body.String())
+	}
+	if containsSubstring(r.Body.String(), "resp_1") {
+		t.Fatalf("should not return original upstream body on conversion error: %q", r.Body.String())
+	}
+}
+
+func TestTransformingWriterBadGatewayWroteBody(t *testing.T) {
+	// Verify that writeHeadlineBadGateway sets wroteBody and prevents
+	// Flush from double-writing, and that Content-Length is correct.
+	conv, err := NewConverter(FormatOpenAI, FormatResponses)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	// Buffer some body
+	w.buf.WriteString(`{"id":"x"}`)
+	// Now force bad gateway
+	w.writeHeadlineBadGateway("conversion failed: test error")
+	// Flush should be a no-op since wroteBody is set
+	w.Flush()
+
+	if r.Code != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", r.Code)
+	}
+	if r.Body.String() != "conversion failed: test error" {
+		t.Errorf("body = %q, want %q", r.Body.String(), "conversion failed: test error")
+	}
+	cl := r.Header().Get("Content-Length")
+	if cl != strconv.Itoa(len("conversion failed: test error")) {
+		t.Errorf("Content-Length = %q, want %d", cl, len("conversion failed: test error"))
+	}
+}
+
+func TestSSEMetadataPreservedWhenDataEmits(t *testing.T) {
+	// Client wants Responses, upstream is OpenAI.
+	conv, err := NewConverter(FormatResponses, FormatOpenAI)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+
+	// event: + data: where data converts to non-nil output
+	sse := "event: chunk\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n"
+	w.Write([]byte(sse))
+	w.Flush()
+
+	body := r.Body.String()
+	if !containsSubstring(body, "response.output_text.delta") {
+		t.Fatalf("expected converted data, got: %q", body)
+	}
+	if !containsSubstring(body, "event: chunk") {
+		t.Fatalf("metadata should be preserved when data emits, got: %q", body)
+	}
+}
+
+func TestSSEMetadataNotEmittedWhenDataSkipped(t *testing.T) {
+	// Client wants Responses, upstream is OpenAI.
+	// Send an event: + data: where the data line produces nil (skipped event).
+	conv, err := NewConverter(FormatResponses, FormatOpenAI)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+
+	// Send a chunk with no choices and no usage — the converter returns the
+	// raw data (pass-through, not nil). We need a chunk that actually
+	// produces nil. Use an OpenAI chunk where delta is empty and no
+	// finish_reason — the converter returns nil for these.
+	// Actually, with our fix, no-choices no-usage passes through.
+	// To get nil, send a chunk where choices[0] has delta=null.
+	sse := "event: skip_me\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":null,\"finish_reason\":null}]}\n\n"
+	w.Write([]byte(sse))
+	w.Flush()
+
+	body := r.Body.String()
+	if containsSubstring(body, "skip_me") {
+		t.Fatalf("metadata should NOT be emitted when data is skipped, got: %q", body)
+	}
+}
+
+func TestSSEAcceptsMetadataWithoutTrailingSpace(t *testing.T) {
+	conv, err := NewConverter(FormatResponses, FormatOpenAI)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+
+	// "event:" without trailing space, then data line
+	sse := "event:chunk\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"X\"},\"finish_reason\":null}]}\n\n"
+	w.Write([]byte(sse))
+	w.Flush()
+
+	body := r.Body.String()
+	if !containsSubstring(body, "response.output_text.delta") {
+		t.Fatalf("expected converted data, got: %q", body)
+	}
+	if !containsSubstring(body, "event:chunk") {
+		t.Fatalf("metadata without space should be preserved, got: %q", body)
+	}
+}
+
+func TestSSECommentPreservedWhenDataEmits(t *testing.T) {
+	conv, err := NewConverter(FormatResponses, FormatOpenAI)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+
+	sse := ": keep this comment\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Y\"},\"finish_reason\":null}]}\n\n"
+	w.Write([]byte(sse))
+	w.Flush()
+
+	body := r.Body.String()
+	if !containsSubstring(body, "response.output_text.delta") {
+		t.Fatalf("expected converted data, got: %q", body)
+	}
+	if !containsSubstring(body, ": keep this comment") {
+		t.Fatalf("comment should be preserved when data emits, got: %q", body)
+	}
+}
+
+func TestSSECommentNotEmittedWhenDataSkipped(t *testing.T) {
+	conv, err := NewConverter(FormatResponses, FormatOpenAI)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+
+	sse := ": drop this comment\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":null,\"finish_reason\":null}]}\n\n"
+	w.Write([]byte(sse))
+	w.Flush()
+
+	body := r.Body.String()
+	if containsSubstring(body, "drop this comment") {
+		t.Fatalf("comment should NOT be emitted when data is skipped, got: %q", body)
+	}
+}
+
+func TestSSEMetadataOnlyFrameIsNotEmitted(t *testing.T) {
+	conv, err := NewConverter(FormatResponses, FormatOpenAI)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+
+	sse := "event: metadata_only\n" +
+		"id: evt_1\n\n"
+	w.Write([]byte(sse))
+	w.Flush()
+
+	body := r.Body.String()
+	if containsSubstring(body, "metadata_only") || containsSubstring(body, "evt_1") {
+		t.Fatalf("metadata-only frame should not be emitted, got: %q", body)
+	}
+}
+
+func TestSSEDataLineWithoutSpace(t *testing.T) {
+	conv, err := NewConverter(FormatResponses, FormatOpenAI)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := httptest.NewRecorder()
+	w := NewTransformingWriter(r, conv)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+
+	// "data:" without space after colon (valid per SSE spec)
+	sse := "data:{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Z\"},\"finish_reason\":null}]}\n\n"
+	w.Write([]byte(sse))
+	w.Flush()
+
+	body := r.Body.String()
+	if !containsSubstring(body, "response.output_text.delta") {
+		t.Fatalf("expected conversion of data: without space, got: %q", body)
+	}
+}
+
+func TestUnsupportedContentTypeResponsesToOpenAI(t *testing.T) {
+	input := `{"model":"gpt-4","input":[{"type":"message","role":"user","content":[{"type":"audio","data":"..."}]}]}`
+	_, err := responsesToOpenAIRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for unsupported content type, got nil")
+	}
+	if !containsSubstring(err.Error(), "unsupported") {
+		t.Errorf("error = %q, want mention of unsupported", err.Error())
+	}
+}
+
+func TestUnsupportedContentTypeOpenAIToAnthropic(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"video","url":"..."}]}],"max_completion_tokens":100}`
+	_, err := openAIToAnthropicRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for unsupported content type, got nil")
+	}
+	if !containsSubstring(err.Error(), "unsupported") {
+		t.Errorf("error = %q, want mention of unsupported", err.Error())
+	}
+}
+
+func TestUnsupportedContentTypeAnthropicToOpenAI(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"audio","data":"..."}]}],"max_tokens":100}`
+	_, err := anthropicToOpenAIRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for unsupported content type, got nil")
+	}
+	if !containsSubstring(err.Error(), "unsupported") {
+		t.Errorf("error = %q, want mention of unsupported", err.Error())
+	}
+}
+
+func TestUnsupportedContentTypeOpenAIToResponses(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"video_file","url":"..."}]}]}`
+	_, err := openAIToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for unsupported content type, got nil")
+	}
+	if !containsSubstring(err.Error(), "unsupported") {
+		t.Errorf("error = %q, want mention of unsupported", err.Error())
+	}
+}
+
+func TestMalformedToolMissingFunction(t *testing.T) {
+	// OpenAI → Responses with a function tool missing the function object
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"tools":[{"type":"function","name":"search"}]}`
+	_, err := openAIToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for malformed tool, got nil")
+	}
+	if !containsSubstring(err.Error(), "non-object function") {
+		t.Errorf("error = %q, want mention of non-object function", err.Error())
+	}
+
+	// OpenAI → Anthropic with same issue
+	input2 := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"max_completion_tokens":100,"tools":[{"type":"function","name":"search"}]}`
+	_, err = openAIToAnthropicRequest([]byte(input2))
+	if err == nil {
+		t.Fatal("expected error for malformed tool, got nil")
+	}
+	if !containsSubstring(err.Error(), "non-object function") {
+		t.Errorf("error = %q, want mention of non-object function", err.Error())
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,7 @@ type TransformingWriter struct {
 	converter   *Converter
 	buf         *bytes.Buffer
 	streamBuf   *bytes.Buffer // accumulates partial SSE lines across Write calls
+	streamMeta  *bytes.Buffer // accumulates SSE metadata lines between blank frames
 	wroteHeader bool
 	wroteBody   bool
 	statusCode  int
@@ -33,6 +35,7 @@ func NewTransformingWriter(w http.ResponseWriter, converter *Converter) *Transfo
 		converter:      converter,
 		buf:            &bytes.Buffer{},
 		streamBuf:      &bytes.Buffer{},
+		streamMeta:     &bytes.Buffer{},
 	}
 }
 
@@ -100,11 +103,17 @@ func (w *TransformingWriter) Flush() {
 			// Pass through error responses as-is — converting them via the success
 			// path would produce a nonsensical response shape.
 			if _, hasError := parsed["error"]; !hasError {
-				if converted, err := w.converter.ConvertResponseMap(parsed); err == nil {
-					if result, err := json.Marshal(converted); err == nil {
-						writeBody = result
-					}
+				converted, convErr := w.converter.ConvertResponseMap(parsed)
+				if convErr != nil {
+					w.writeHeadlineBadGateway("response conversion failed: " + convErr.Error())
+					return
 				}
+				result, marshalErr := json.Marshal(converted)
+				if marshalErr != nil {
+					w.writeHeadlineBadGateway("response conversion failed: " + marshalErr.Error())
+					return
+				}
+				writeBody = result
 			}
 		}
 	}
@@ -131,11 +140,29 @@ func (w *TransformingWriter) writeStream(data []byte) (int, error) {
 	var outBuf bytes.Buffer
 	buf := w.streamBuf.Bytes()
 
+	// isSSEMeta returns true for SSE metadata lines (event:, id:, retry:, comments).
+	isSSEMeta := func(line []byte) bool {
+		if bytes.HasPrefix(line, []byte(":")) {
+			return true
+		}
+		// Accept "event:" with or without a trailing space.
+		if bytes.HasPrefix(line, []byte("event:")) {
+			return true
+		}
+		if bytes.HasPrefix(line, []byte("id:")) {
+			return true
+		}
+		if bytes.HasPrefix(line, []byte("retry:")) {
+			return true
+		}
+		return false
+	}
+
 	// Find complete lines (terminated by \n)
 	for {
 		idx := bytes.IndexByte(buf, '\n')
 		if idx < 0 {
-			break // No complete line, wait for more data
+			break
 		}
 
 		line := buf[:idx]
@@ -144,24 +171,57 @@ func (w *TransformingWriter) writeStream(data []byte) (int, error) {
 		// Trim \r for \r\n line endings
 		line = bytes.TrimRight(line, "\r")
 
-		if !bytes.HasPrefix(line, []byte("data: ")) {
-			// Non-"data: " lines (empty lines, event type lines, etc.) are skipped.
+		// Blank line = end of SSE frame. Flush buffered metadata if the
+		// frame had metadata without emitted data, then emit the boundary.
+		if len(line) == 0 {
+			w.streamMeta.Reset()
+			outBuf.WriteByte('\n')
 			continue
 		}
 
-		payload := bytes.TrimPrefix(line, []byte("data: "))
+		// Accumulate metadata lines — they are emitted only when the
+		// associated data line produces converted output.
+		if isSSEMeta(line) {
+			w.streamMeta.Write(line)
+			w.streamMeta.WriteByte('\n')
+			continue
+		}
+
+		// Accept "data:" with or without a single space after the colon.
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+
+		var payload []byte
+		if bytes.HasPrefix(line, []byte("data: ")) {
+			payload = bytes.TrimPrefix(line, []byte("data: "))
+		} else {
+			payload = bytes.TrimPrefix(line, []byte("data:"))
+		}
 
 		if string(payload) == "[DONE]" {
 			converted, err := w.converter.FormatStreamLine([]byte("[DONE]"))
 			if err == nil && converted != nil {
+				if w.streamMeta.Len() > 0 {
+					outBuf.Write(w.streamMeta.Bytes())
+				}
 				outBuf.Write(converted)
 			}
+			w.streamMeta.Reset()
 			continue
 		}
 
 		converted, err := w.converter.FormatStreamLine(payload)
 		if err == nil && converted != nil {
+			if w.streamMeta.Len() > 0 {
+				outBuf.Write(w.streamMeta.Bytes())
+			}
 			outBuf.Write(converted)
+			w.streamMeta.Reset()
+		} else {
+			// Data line was skipped — discard any buffered metadata to
+			// avoid orphan event:/id:/retry: lines with no data.
+			w.streamMeta.Reset()
 		}
 	}
 
@@ -181,6 +241,17 @@ func (w *TransformingWriter) writeStream(data []byte) (int, error) {
 	}
 
 	return len(data), nil
+}
+
+// writeHeadlineBadGateway writes a 502 Bad Gateway response with a text/plain body.
+// Used when non-streaming response conversion fails. Sets wroteBody so Flush
+// does not attempt a second write.
+func (w *TransformingWriter) writeHeadlineBadGateway(msg string) {
+	w.wroteBody = true
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(msg)))
+	w.ResponseWriter.WriteHeader(http.StatusBadGateway)
+	_, _ = w.ResponseWriter.Write([]byte(msg))
 }
 
 // Hijack implements the http.Hijacker interface for WebSocket support.

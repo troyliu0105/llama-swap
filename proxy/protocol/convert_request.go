@@ -71,9 +71,13 @@ func responsesToOpenAIRequest(body []byte) ([]byte, error) {
 				default:
 					role, _ := msg["role"].(string)
 					content := msg["content"]
+					converted, convErr := convertResponsesContentToOpenAI(content)
+					if convErr != nil {
+						return nil, convErr
+					}
 					outMsg := map[string]any{
 						"role":    role,
-						"content": convertResponsesContentToOpenAI(content),
+						"content": converted,
 					}
 					messages = append(messages, outMsg)
 				}
@@ -117,10 +121,10 @@ func responsesToOpenAIRequest(body []byte) ([]byte, error) {
 	// Convert tools (function type only)
 	if tools, ok := req["tools"].([]any); ok {
 		var openaiTools []any
-		for _, t := range tools {
+		for i, t := range tools {
 			tool, ok := t.(map[string]any)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("invalid responses tool at index %d", i)
 			}
 			toolType, _ := tool["type"].(string)
 			if toolType == "function" {
@@ -133,6 +137,8 @@ func responsesToOpenAIRequest(body []byte) ([]byte, error) {
 						"strict":      tool["strict"],
 					},
 				})
+			} else {
+				return nil, fmt.Errorf("unsupported tool type %q in responses→openai conversion", toolType)
 			}
 		}
 		if len(openaiTools) > 0 {
@@ -148,16 +154,16 @@ func responsesToOpenAIRequest(body []byte) ([]byte, error) {
 }
 
 // convertResponsesContentToOpenAI converts Responses API content to OpenAI content.
-func convertResponsesContentToOpenAI(content any) any {
+func convertResponsesContentToOpenAI(content any) (any, error) {
 	switch v := content.(type) {
 	case string:
-		return v
+		return v, nil
 	case []any:
 		var parts []any
-		for _, part := range v {
+		for i, part := range v {
 			p, ok := part.(map[string]any)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("invalid responses content part at index %d", i)
 			}
 			typ, _ := p["type"].(string)
 			switch typ {
@@ -188,21 +194,19 @@ func convertResponsesContentToOpenAI(content any) any {
 					parts = append(parts, map[string]any{"type": "file", "file": file})
 				}
 			default:
-				if text, ok := p["text"].(string); ok {
-					parts = append(parts, map[string]any{"type": "text", "text": text})
-				}
+				return nil, fmt.Errorf("unsupported responses content type %q", typ)
 			}
 		}
 		if len(parts) == 1 {
 			if t, ok := parts[0].(map[string]any); ok {
 				if t["type"] == "text" && len(t) == 2 {
-					return t["text"]
+					return t["text"], nil
 				}
 			}
 		}
-		return parts
+		return parts, nil
 	default:
-		return content
+		return content, nil
 	}
 }
 
@@ -289,21 +293,28 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 			}
 
 			outMsg := map[string]any{
-				"role":    role,
-				"content": convertOpenAIContentToResponses(msg["content"]),
+				"role": role,
 			}
+			converted, convErr := convertOpenAIContentToResponses(msg["content"])
+			if convErr != nil {
+				return nil, convErr
+			}
+			outMsg["content"] = converted
 			input = append(input, outMsg)
 
 			// Handle assistant tool_calls after the assistant message so the
 			// Responses input preserves chat message order.
 			if role == "assistant" {
 				if toolCalls, ok := msg["tool_calls"].([]any); ok && len(toolCalls) > 0 {
-					for _, tc := range toolCalls {
+					for i, tc := range toolCalls {
 						tcMap, ok := tc.(map[string]any)
 						if !ok {
-							continue
+							return nil, fmt.Errorf("invalid openai tool_call at index %d", i)
 						}
-						fn, _ := tcMap["function"].(map[string]any)
+						fn, ok := tcMap["function"].(map[string]any)
+						if !ok {
+							return nil, fmt.Errorf("openai tool_call at index %d has non-object function field", i)
+						}
 						input = append(input, map[string]any{
 							"type":      "function_call",
 							"call_id":   tcMap["id"],
@@ -350,14 +361,17 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 	// Convert tools
 	if tools, ok := req["tools"].([]any); ok {
 		var respTools []any
-		for _, t := range tools {
+		for i, t := range tools {
 			tool, ok := t.(map[string]any)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("invalid openai tool at index %d", i)
 			}
 			toolType, _ := tool["type"].(string)
 			if toolType == "function" {
-				fn, _ := tool["function"].(map[string]any)
+				fn, ok := tool["function"].(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("tool %q has non-object function field in openai→responses conversion", toolType)
+				}
 				respTools = append(respTools, map[string]any{
 					"type":        "function",
 					"name":        fn["name"],
@@ -365,6 +379,8 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 					"parameters":  fn["parameters"],
 					"strict":      fn["strict"],
 				})
+			} else {
+				return nil, fmt.Errorf("unsupported tool type %q in openai→responses conversion", toolType)
 			}
 		}
 		if len(respTools) > 0 {
@@ -380,16 +396,16 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 }
 
 // convertOpenAIContentToResponses converts OpenAI message content to Responses API format.
-func convertOpenAIContentToResponses(content any) any {
+func convertOpenAIContentToResponses(content any) (any, error) {
 	switch v := content.(type) {
 	case string:
-		return v
+		return v, nil
 	case []any:
 		var parts []any
-		for _, part := range v {
+		for i, part := range v {
 			p, ok := part.(map[string]any)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("invalid openai content part at index %d", i)
 			}
 			typ, _ := p["type"].(string)
 			switch typ {
@@ -422,21 +438,19 @@ func convertOpenAIContentToResponses(content any) any {
 					parts = append(parts, part)
 				}
 			default:
-				if text, ok := p["text"].(string); ok {
-					parts = append(parts, map[string]any{"type": "input_text", "text": text})
-				}
+				return nil, fmt.Errorf("unsupported openai content type %q", typ)
 			}
 		}
 		if len(parts) == 1 {
 			if t, ok := parts[0].(map[string]any); ok {
 				if t["type"] == "input_text" && len(t) == 2 {
-					return t["text"]
+					return t["text"], nil
 				}
 			}
 		}
-		return parts
+		return parts, nil
 	default:
-		return content
+		return content, nil
 	}
 }
 
@@ -462,7 +476,10 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 
 	// system prompt
 	if sys, ok := req["system"]; ok {
-		sysContent := anthropicContentToOpenAI(sys)
+		sysContent, convErr := anthropicContentToOpenAI(sys)
+		if convErr != nil {
+			return nil, convErr
+		}
 		messages = append(messages, map[string]any{
 			"role":    "system",
 			"content": sysContent,
@@ -516,7 +533,6 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 						if len(textParts) == 1 {
 							outMsg["content"] = textParts[0]
 						} else {
-							// concatenate
 							var sb strings.Builder
 							for _, p := range textParts {
 								sb.WriteString(fmt.Sprint(p))
@@ -527,28 +543,44 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 						outMsg["content"] = nil
 					}
 				} else {
-					outMsg["content"] = anthropicContentToOpenAI(content)
+					converted, convErr := anthropicContentToOpenAI(content)
+					if convErr != nil {
+						return nil, convErr
+					}
+					outMsg["content"] = converted
 				}
 			} else if role == "user" {
 				if contentArr, ok := content.([]any); ok {
 					var userBlocks []any
+					var flushErr error
 					flushUserBlocks := func() {
-						if len(userBlocks) == 0 {
+						if len(userBlocks) == 0 || flushErr != nil {
+							return
+						}
+						converted, convErr := anthropicContentToOpenAI(userBlocks)
+						if convErr != nil {
+							flushErr = convErr
 							return
 						}
 						messages = append(messages, map[string]any{
 							"role":    "user",
-							"content": anthropicContentToOpenAI(userBlocks),
+							"content": converted,
 						})
 						userBlocks = nil
 					}
 					for _, block := range contentArr {
+						if flushErr != nil {
+							return nil, flushErr
+						}
 						blockMap, ok := block.(map[string]any)
 						if !ok {
 							continue
 						}
 						if blockType, _ := blockMap["type"].(string); blockType == "tool_result" {
 							flushUserBlocks()
+							if flushErr != nil {
+								return nil, flushErr
+							}
 							messages = append(messages, map[string]any{
 								"role":         "tool",
 								"content":      anthropicToolResultText(blockMap["content"]),
@@ -559,11 +591,22 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 						userBlocks = append(userBlocks, block)
 					}
 					flushUserBlocks()
+					if flushErr != nil {
+						return nil, flushErr
+					}
 					continue
 				}
-				outMsg["content"] = anthropicContentToOpenAI(content)
+				converted, convErr := anthropicContentToOpenAI(content)
+				if convErr != nil {
+					return nil, convErr
+				}
+				outMsg["content"] = converted
 			} else {
-				outMsg["content"] = anthropicContentToOpenAI(content)
+				converted, convErr := anthropicContentToOpenAI(content)
+				if convErr != nil {
+					return nil, convErr
+				}
+				outMsg["content"] = converted
 			}
 
 			messages = append(messages, outMsg)
@@ -597,10 +640,10 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 	// Convert tools
 	if tools, ok := req["tools"].([]any); ok {
 		var openaiTools []any
-		for _, t := range tools {
+		for i, t := range tools {
 			tool, ok := t.(map[string]any)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("invalid anthropic tool at index %d", i)
 			}
 			toolType, _ := tool["type"].(string)
 			if toolType == "custom" {
@@ -613,14 +656,14 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 						"strict":      tool["strict"],
 					},
 				})
+			} else {
+				return nil, fmt.Errorf("unsupported tool type %q in anthropic→openai conversion", toolType)
 			}
 		}
 		if len(openaiTools) > 0 {
 			out["tools"] = openaiTools
 		}
 	}
-
-	// Convert tool_choice
 	if tc, ok := req["tool_choice"].(map[string]any); ok {
 		tcType, _ := tc["type"].(string)
 		switch tcType {
@@ -643,16 +686,16 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 }
 
 // anthropicContentToOpenAI converts Anthropic content blocks to OpenAI format.
-func anthropicContentToOpenAI(content any) any {
+func anthropicContentToOpenAI(content any) (any, error) {
 	switch v := content.(type) {
 	case string:
-		return v
+		return v, nil
 	case []any:
 		var parts []any
-		for _, block := range v {
+		for i, block := range v {
 			b, ok := block.(map[string]any)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("invalid anthropic content block at index %d", i)
 			}
 			typ, _ := b["type"].(string)
 			switch typ {
@@ -673,22 +716,22 @@ func anthropicContentToOpenAI(content any) any {
 						parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + mediaType + ";base64," + data}})
 					}
 				}
+			case "tool_result":
+				// Handled by the caller; should not appear here but skip gracefully.
 			default:
-				if text, ok := b["text"].(string); ok {
-					parts = append(parts, map[string]any{"type": "text", "text": text})
-				}
+				return nil, fmt.Errorf("unsupported anthropic content type %q", typ)
 			}
 		}
 		if len(parts) == 1 {
 			if t, ok := parts[0].(map[string]any); ok {
 				if t["type"] == "text" && len(t) == 2 {
-					return t["text"]
+					return t["text"], nil
 				}
 			}
 		}
-		return parts
+		return parts, nil
 	default:
-		return content
+		return content, nil
 	}
 }
 
@@ -732,7 +775,11 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 
 			if role == "system" || role == "developer" {
 				if systemContent == nil {
-					systemContent = openAIContentToAnthropic(msg["content"])
+					converted, convErr := openAIContentToAnthropic(msg["content"])
+					if convErr != nil {
+						return nil, convErr
+					}
+					systemContent = converted
 				}
 				continue
 			}
@@ -771,12 +818,15 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 							})
 						}
 					}
-					for _, tc := range toolCalls {
+					for i, tc := range toolCalls {
 						tcMap, ok := tc.(map[string]any)
 						if !ok {
-							continue
+							return nil, fmt.Errorf("invalid openai tool_call at index %d", i)
 						}
-						fn, _ := tcMap["function"].(map[string]any)
+						fn, ok := tcMap["function"].(map[string]any)
+						if !ok {
+							return nil, fmt.Errorf("openai tool_call at index %d has non-object function field", i)
+						}
 						argsStr, _ := fn["arguments"].(string)
 						var argsParsed any
 						if err := json.Unmarshal([]byte(argsStr), &argsParsed); err != nil {
@@ -791,10 +841,18 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 					}
 					outMsg["content"] = contentBlocks
 				} else {
-					outMsg["content"] = openAIContentToAnthropic(msg["content"])
+					converted, convErr := openAIContentToAnthropic(msg["content"])
+					if convErr != nil {
+						return nil, convErr
+					}
+					outMsg["content"] = converted
 				}
 			} else {
-				outMsg["content"] = openAIContentToAnthropic(msg["content"])
+				converted, convErr := openAIContentToAnthropic(msg["content"])
+				if convErr != nil {
+					return nil, convErr
+				}
+				outMsg["content"] = converted
 			}
 
 			messages = append(messages, outMsg)
@@ -827,14 +885,17 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 	// Convert tools
 	if tools, ok := req["tools"].([]any); ok {
 		var anthropicTools []any
-		for _, t := range tools {
+		for i, t := range tools {
 			tool, ok := t.(map[string]any)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("invalid openai tool at index %d", i)
 			}
 			toolType, _ := tool["type"].(string)
 			if toolType == "function" {
-				fn, _ := tool["function"].(map[string]any)
+				fn, ok := tool["function"].(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("tool %q has non-object function field in openai→anthropic conversion", toolType)
+				}
 				anthropicTools = append(anthropicTools, map[string]any{
 					"type":         "custom",
 					"name":         fn["name"],
@@ -842,6 +903,8 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 					"input_schema": fn["parameters"],
 					"strict":       fn["strict"],
 				})
+			} else {
+				return nil, fmt.Errorf("unsupported tool type %q in openai→anthropic conversion", toolType)
 			}
 		}
 		if len(anthropicTools) > 0 {
@@ -875,19 +938,19 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 }
 
 // openAIContentToAnthropic converts OpenAI message content to Anthropic format.
-func openAIContentToAnthropic(content any) any {
+func openAIContentToAnthropic(content any) (any, error) {
 	switch v := content.(type) {
 	case string:
 		if v == "" {
-			return []any{}
+			return []any{}, nil
 		}
-		return v
+		return v, nil
 	case []any:
 		var blocks []any
-		for _, part := range v {
+		for i, part := range v {
 			p, ok := part.(map[string]any)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("invalid openai content part at index %d", i)
 			}
 			typ, _ := p["type"].(string)
 			switch typ {
@@ -903,7 +966,6 @@ func openAIContentToAnthropic(content any) any {
 				if imgMap != nil {
 					url, _ := imgMap["url"].(string)
 					if strings.HasPrefix(url, "data:image/") {
-						// Parse data URI: data:image/png;base64,xxxx
 						parts := strings.SplitN(url, ",", 2)
 						if len(parts) == 2 {
 							mediaInfo := strings.TrimPrefix(parts[0], "data:")
@@ -928,19 +990,14 @@ func openAIContentToAnthropic(content any) any {
 					}
 				}
 			default:
-				if text, ok := p["text"].(string); ok {
-					blocks = append(blocks, map[string]any{
-						"type": "text",
-						"text": text,
-					})
-				}
+				return nil, fmt.Errorf("unsupported openai→anthropic content type %q", typ)
 			}
 		}
-		return blocks
+		return blocks, nil
 	case nil:
-		return []any{}
+		return []any{}, nil
 	default:
-		return content
+		return content, nil
 	}
 }
 

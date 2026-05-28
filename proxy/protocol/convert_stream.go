@@ -51,7 +51,7 @@ func convertOpenAIStreamToResponses(data []byte) ([]byte, error) {
 				},
 			})
 		}
-		return nil, nil
+		return data, nil
 	}
 
 	choice, _ := choices[0].(map[string]any)
@@ -312,7 +312,7 @@ func convertResponsesStreamToOpenAI(data []byte) ([]byte, error) {
 
 	default:
 		// Pass through unknown events
-		return nil, nil
+		return data, nil
 	}
 }
 
@@ -496,7 +496,7 @@ func convertAnthropicStreamToOpenAI(data []byte) ([]byte, error) {
 		return nil, nil
 
 	default:
-		return nil, nil
+		return data, nil
 	}
 
 	return nil, nil
@@ -530,7 +530,7 @@ func convertOpenAIStreamToAnthropic(data []byte) ([]byte, error) {
 				"usage": convertOpenAIUsageToAnthropic(usage),
 			})
 		}
-		return nil, nil
+		return data, nil
 	}
 
 	choice, _ := choices[0].(map[string]any)
