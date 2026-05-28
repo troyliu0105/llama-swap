@@ -1295,6 +1295,8 @@ func TestNewPeerProxy_CustomTimeouts(t *testing.T) {
 	assert.Equal(t, 15*time.Second, transport.TLSHandshakeTimeout)
 	assert.Equal(t, 2*time.Second, transport.ExpectContinueTimeout)
 	assert.Equal(t, 120*time.Second, transport.IdleConnTimeout)
-	// ForceAttemptHTTP2 should be enabled
-	assert.True(t, transport.ForceAttemptHTTP2)
+	// Peer proxy disables HTTP/2 because some upstream streaming APIs reset
+	// long-running HTTP/2 streams with INTERNAL_ERROR.
+	assert.False(t, transport.ForceAttemptHTTP2)
+	assert.NotNil(t, transport.TLSNextProto)
 }

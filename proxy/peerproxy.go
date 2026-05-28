@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -87,11 +88,12 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, prefixPeerModels bool, prox
 			TLSHandshakeTimeout:   time.Duration(peer.Timeouts.TLSHandshake) * time.Second,
 			ResponseHeaderTimeout: time.Duration(peer.Timeouts.ResponseHeader) * time.Second,
 			ExpectContinueTimeout: time.Duration(peer.Timeouts.ExpectContinue) * time.Second,
-			ForceAttemptHTTP2:     true,
+			ForceAttemptHTTP2:     false,
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
 			IdleConnTimeout:       time.Duration(peer.Timeouts.IdleConn) * time.Second,
 		}
+		disablePeerHTTP2(peerTransport)
 
 		// Create reverse proxy for this peer
 		reverseProxy := httputil.NewSingleHostReverseProxy(peer.ProxyURL)
@@ -527,4 +529,13 @@ func (rt *headerStrippingRoundTripper) RoundTrip(req *http.Request) (*http.Respo
 		req.Header.Del(key)
 	}
 	return rt.Transport.RoundTrip(req)
+}
+
+func disablePeerHTTP2(transport *http.Transport) {
+	// Some upstream peer APIs reset long-running HTTP/2 response streams with
+	// INTERNAL_ERROR. ReverseProxy reports those resets as body-copy read errors
+	// and the client loses the generation mid-stream. Peer traffic is more
+	// reliable over HTTP/1.1, where each streaming request has its own connection.
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 }
