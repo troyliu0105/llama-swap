@@ -843,8 +843,78 @@ llama.cpp provides partial compatibility with the Responses API through an inter
 
 ## llama-swap Proxy Notes
 
-llama-swap proxies `/v1/responses` requests to the upstream llama.cpp server. The route is registered in `proxy/proxymanager.go`.
+llama-swap proxies `/v1/responses` requests and supports automatic protocol conversion when the upstream server uses a different format (e.g. OpenAI Chat Completions or Anthropic Messages).
 
-Since llama.cpp provides the conversion shim internally, llama-swap does not need to transform the request or response itself. The request passes through as-is, and the streaming events flow back to the client unchanged.
+### Protocol Conversion
 
-Usage token tracking works through the `response.completed` event's `response.usage` path. llama-swap can capture these tokens the same way it tracks usage for other endpoints.
+When a peer is configured with `upstreamFormat: "openai"`, llama-swap converts Responses API requests to Chat Completions format before forwarding, then converts the response back to Responses format for the client.
+
+#### Request Conversion (Responses → Chat Completions)
+
+| Responses Field | Chat Completions Field | Notes |
+|---|---|---|
+| `instructions` | `messages[0].role: "system"` | First system/developer message only |
+| `input` (string) | `messages[].role: "user"` | Single string → one user message |
+| `input` (array) | `messages[]` | Items converted by role and type |
+| `input[].type: "function_call"` | assistant message with `tool_calls` | Preserved as ordered messages |
+| `input[].type: "function_call_output"` | `messages[].role: "tool"` | With `tool_call_id` |
+| `max_output_tokens` | `max_completion_tokens` | Direct rename |
+| `text.format` | `response_format` | JSON schema passthrough |
+| `tools` (function only) | `tools` | Only function tool type supported |
+
+Unsupported in conversion: `previous_response_id`, `reasoning`, `store`, `background`, non-function tool types (`web_search`, `file_search`, `code_interpreter`, `mcp`), `include`.
+
+#### Response Conversion (Chat Completions → Responses)
+
+| Chat Completions Field | Responses Field | Notes |
+|---|---|---|
+| `choices[].message.content` | `output[].type: "message"` | String → `output_text` content part |
+| `choices[].message.tool_calls` | `output[].type: "function_call"` | Separate output items |
+| `usage` | `response.usage` | Field names converted (see Usage) |
+| `id` | `id` | Prefixed with `resp_` |
+
+Non-streaming `created_at` is generated at conversion time, not copied from source.
+
+#### Streaming SSE Conversion (Chat Completions → Responses)
+
+The stream lifecycle is synthesized from the Chat Completions chunk stream:
+
+1. **Start events** — emitted exactly once on the first chunk carrying `role: "assistant"`:
+   - `response.created`
+   - `response.in_progress`
+   - `response.output_item.added`
+   - `response.content_part.added`
+
+2. **Delta events** — one per content chunk:
+   - `delta.content` → `response.output_text.delta`
+   - `delta.reasoning_content` → `response.output_text.delta` (reasoning text mapped as regular text output)
+   - `delta.tool_calls` → `response.function_call_arguments.delta`
+
+3. **End events** — emitted on the finish chunk:
+   - `response.content_part.done`
+   - `response.output_item.done`
+   - `response.completed` (if usage is present in the finish chunk)
+
+Some providers (e.g. zhipu/glm) include `role: "assistant"` in every chunk alongside `reasoning_content`. The converter tracks stream state to emit start events only once, preventing duplicate lifecycle events.
+
+4. **Terminal marker** — `[DONE]` from upstream is converted to a bare `response.completed` event.
+
+#### Usage Conversion
+
+| Chat Completions Field | Responses Field |
+|---|---|
+| `prompt_tokens` | `input_tokens` |
+| `completion_tokens` | `output_tokens` |
+| `total_tokens` | `total_tokens` |
+| `prompt_tokens_details.cached_tokens` | `input_tokens_details.cached_tokens` |
+| `completion_tokens_details.reasoning_tokens` | `output_tokens_details.reasoning_tokens` |
+
+Cache detail fields are preserved when present.
+
+#### Streaming Usage Placement
+
+When the upstream includes usage in the final chunk (alongside `choices`), the converter extracts it and emits `response.completed` with `response.usage` as part of the end events. If the upstream emits a separate usage-only chunk (empty `choices`, `stream_options.include_usage: true`), that is also handled.
+
+### Metrics Note
+
+llama-swap's metrics monitor captures token usage from streaming responses by scanning SSE `data:` lines for usage fields. For converted streams, usage is available in the `response.completed` event under `response.usage`. When the upstream provider does not include usage data in streaming mode, the metrics recorder falls back to minimal metrics and emits a warning: `error processing streaming response: no valid JSON data found in stream`. This is non-fatal — the client still receives the correct response.

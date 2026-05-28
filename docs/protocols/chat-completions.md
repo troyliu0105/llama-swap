@@ -314,6 +314,29 @@ When `stream: true` is set, the response is delivered as a series of Server-Sent
 
 The `delta` field contains incremental content. The first chunk typically includes `{"role": "assistant"}`. Subsequent chunks contain content fragments. The final chunk has a non-null `finish_reason`.
 
+### Reasoning Content
+
+Some providers (e.g. zhipu/glm, DeepSeek) include a `reasoning_content` field in the delta alongside `content`. This carries the model's chain-of-thought reasoning:
+
+```json
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion.chunk",
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "role": "assistant",
+        "reasoning_content": "Let me think about this..."
+      },
+      "finish_reason": null
+    }
+  ]
+}
+```
+
+These providers typically include `role: "assistant"` in every chunk (not just the first). When llama-swap converts to Responses API format, it tracks stream state to avoid emitting duplicate lifecycle events and maps `reasoning_content` as `response.output_text.delta` events.
+
 ### Stream Lifecycle
 
 ```
@@ -562,3 +585,16 @@ Key points:
 - Streaming responses are forwarded directly. The proxy does not buffer SSE chunks.
 - Token usage statistics from the upstream server pass through unchanged.
 - For clients behind a reverse proxy (nginx, Caddy), make sure response buffering is disabled for streaming to work. llama-swap sets the `X-Accel-Buffering: no` header as a safeguard, but explicit proxy configuration is more reliable.
+
+### Protocol Conversion
+
+When a peer is configured with `upstreamFormat`, llama-swap converts between Chat Completions and the target format (Responses API or Anthropic Messages). The conversion handles:
+
+- Request body transformation (messages ↔ input, tools, content parts)
+- Response body transformation (choices ↔ output array)
+- Streaming SSE event conversion (chunk deltas ↔ lifecycle events)
+- Usage field mapping (prompt_tokens ↔ input_tokens, cache details)
+
+Only function tools are supported in cross-protocol conversion. Non-function tool types (web_search, file_search, code_interpreter, mcp) are rejected during request conversion.
+
+When the upstream provider includes `reasoning_content` in streaming chunks, llama-swap maps it to regular text output in the target protocol.

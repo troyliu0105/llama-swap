@@ -822,6 +822,51 @@ llama.cpp's server registers `/v1/messages` and `/v1/messages/count_tokens` endp
 
 llama-swap proxies `/v1/messages` and `/v1/messages/count_tokens` requests to the upstream llama.cpp server. The route is registered in `proxy/proxymanager.go`.
 
+### Protocol Conversion
+
+When a peer is configured with `upstreamFormat: "anthropic"`, llama-swap converts between Anthropic Messages and the client's format (Responses API or Chat Completions). Conversions between Anthropic and Responses use Chat Completions as an intermediate format, which causes some semantic loss.
+
+#### Request Conversion
+
+| Client Format | Anthropic Field | Notes |
+|---|---|---|
+| OpenAI `messages[].role: "system"` | `system` parameter | Extracted to top-level |
+| OpenAI `tool_calls` | `tool_use` content blocks | Moved into `content[]` |
+| OpenAI `role: "tool"` | `tool_result` content block | With `tool_use_id` |
+| Responses `instructions` | `system` parameter | Via OpenAI intermediate |
+| Responses `function_call` input | `tool_use` block | Via OpenAI intermediate |
+
+#### Response Conversion
+
+| Anthropic Field | OpenAI/Responses Field | Notes |
+|---|---|---|
+| `content[].type: "text"` | `choices[].message.content` or `output_text` | Text blocks concatenate |
+| `content[].type: "tool_use"` | `tool_calls` or `function_call` output | `input` → JSON-stringified `arguments` |
+| `content[].type: "thinking"` | Dropped | No equivalent in OpenAI/Responses |
+| `stop_reason` | `finish_reason` | `end_turn`→`stop`, `max_tokens`→`length`, `tool_use`→`tool_calls` |
+
+#### Streaming Conversion
+
+| Anthropic Event | OpenAI/Responses Equivalent |
+|---|---|
+| `message_start` | First chunk with `role: "assistant"` |
+| `content_block_delta` (text_delta) | `delta.content` or `response.output_text.delta` |
+| `content_block_delta` (input_json_delta) | `delta.tool_calls` or `response.function_call_arguments.delta` |
+| `content_block_delta` (thinking_delta) | Dropped |
+| `message_delta` | Finish chunk with `finish_reason` |
+| `message_stop` | `[DONE]` or `response.completed` |
+
+#### Usage Conversion
+
+| Anthropic Field | OpenAI Field | Notes |
+|---|---|---|
+| `input_tokens` | `prompt_tokens` (partial) | See below |
+| `output_tokens` | `completion_tokens` | Direct |
+| `cache_creation_input_tokens` | `prompt_tokens_details.cache_creation_tokens` | If > 0 |
+| `cache_read_input_tokens` | `prompt_tokens_details.cached_tokens` | If > 0 |
+
+OpenAI `prompt_tokens` is reconstructed as `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. The reverse conversion subtracts cache fields to compute `input_tokens`.
+
 ### Usage Tracking
 
 When collecting token usage from streaming responses, the input and output tokens arrive in separate SSE events:
