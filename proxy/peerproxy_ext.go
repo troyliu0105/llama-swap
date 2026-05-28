@@ -128,8 +128,10 @@ type enhancedPeerMember struct {
 
 	// upstreamFormat is the wire protocol the upstream server expects.
 	// Only used when convertProtocol is true.
-	upstreamFormat   protocol.Format
-	convertProtocol  bool
+	upstreamFormat  protocol.Format
+	convertProtocol bool
+	// converters caches pre-built converters keyed by client format.
+	converters map[protocol.Format]*protocol.Converter
 }
 
 // EnhancedPeerProxy manages proxying requests to remote peer servers with extended features
@@ -194,6 +196,18 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			logger:          proxyLogger,
 			upstreamFormat:  protocol.ParseFormat(peer.UpstreamFormat),
 			convertProtocol: peer.UpstreamFormat != "",
+		}
+
+		// Pre-build converters for all possible client formats
+		if pp.convertProtocol && pp.upstreamFormat != protocol.FormatUnknown {
+			pp.converters = make(map[protocol.Format]*protocol.Converter)
+			for _, clientFmt := range []protocol.Format{protocol.FormatOpenAI, protocol.FormatResponses, protocol.FormatAnthropic} {
+				if clientFmt != pp.upstreamFormat {
+					if conv, err := protocol.NewConverter(clientFmt, pp.upstreamFormat); err == nil {
+						pp.converters[clientFmt] = conv
+					}
+				}
+			}
 		}
 
 		if peer.Type == "codex" && peer.Codex != nil {
@@ -540,21 +554,32 @@ func (p *EnhancedPeerProxy) ProxyRequest(modelID string, writer http.ResponseWri
 	if pp.convertProtocol && pp.upstreamFormat != protocol.FormatUnknown {
 		clientFormat := protocol.DetectClientFormat(request.URL.Path)
 		if protocol.NeedsConversion(clientFormat, pp.upstreamFormat) {
-			converter, err := protocol.NewConverter(clientFormat, pp.upstreamFormat)
-			if err != nil {
-				peerLog("[PEER ERROR] %s | %s | protocol_convert_error | %s\n",
-					getPeerReqID(request), modelID, err)
-				http.Error(writer, fmt.Sprintf("protocol conversion error: %v", err), http.StatusInternalServerError)
+			converter := pp.converters[clientFormat]
+			if converter == nil {
+				peerLog("[PEER ERROR] %s | %s | protocol_convert_error | no converter for %s→%s\n",
+					getPeerReqID(request), modelID, clientFormat, pp.upstreamFormat)
+				http.Error(writer, "protocol conversion error: unsupported direction", http.StatusInternalServerError)
 				return nil
 			}
 
-			// Read and convert request body
-			bodyBytes, err := io.ReadAll(request.Body)
+			// Reject oversized bodies before reading
+			const maxRequestBodySize int64 = 100 << 20
+			if request.ContentLength > maxRequestBodySize {
+				http.Error(writer, "request body too large for conversion", http.StatusRequestEntityTooLarge)
+				return nil
+			}
+
+			// Read body with size limit as a safety net for unknown Content-Length
+			bodyBytes, err := io.ReadAll(io.LimitReader(request.Body, maxRequestBodySize+1))
 			if err != nil {
 				http.Error(writer, "failed to read request body for conversion", http.StatusBadRequest)
 				return nil
 			}
 			request.Body.Close()
+			if int64(len(bodyBytes)) > maxRequestBodySize {
+				http.Error(writer, "request body too large for conversion", http.StatusRequestEntityTooLarge)
+				return nil
+			}
 
 			newBody, newPath, err := converter.ConvertRequest(bodyBytes, request.URL.Path)
 			if err != nil {

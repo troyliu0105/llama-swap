@@ -11,13 +11,8 @@ import (
 // openai (chat completions) response → responses
 // ---------------------------------------------------------------------------
 
-func convertOpenAIResponseToResponses(body []byte) ([]byte, error) {
-	var resp map[string]any
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, err
-	}
-
-	out := make(map[string]any)
+func convertOpenAIResponseMapToResponses(resp map[string]any) (map[string]any, error) {
+	out := make(map[string]any, 8)
 	out["id"] = prefixID(resp["id"], "resp_")
 	out["object"] = "response"
 	out["created_at"] = time.Now().Unix()
@@ -98,6 +93,19 @@ func convertOpenAIResponseToResponses(body []byte) ([]byte, error) {
 		}
 	}
 
+	return out, nil
+}
+
+// Legacy byte-based wrapper for direct tests.
+func convertOpenAIResponseToResponses(body []byte) ([]byte, error) {
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	out, err := convertOpenAIResponseMapToResponses(resp)
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(out)
 }
 
@@ -105,13 +113,8 @@ func convertOpenAIResponseToResponses(body []byte) ([]byte, error) {
 // responses → openai (chat completions) response
 // ---------------------------------------------------------------------------
 
-func convertResponsesResponseToOpenAI(body []byte) ([]byte, error) {
-	var resp map[string]any
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, err
-	}
-
-	out := make(map[string]any)
+func convertResponsesResponseMapToOpenAI(resp map[string]any) (map[string]any, error) {
+	out := make(map[string]any, 8)
 	out["id"] = prefixID(resp["id"], "chatcmpl-")
 	out["object"] = "chat.completion"
 	out["created"] = time.Now().Unix()
@@ -186,6 +189,18 @@ func convertResponsesResponseToOpenAI(body []byte) ([]byte, error) {
 		}
 	}
 
+	return out, nil
+}
+
+func convertResponsesResponseToOpenAI(body []byte) ([]byte, error) {
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	out, err := convertResponsesResponseMapToOpenAI(resp)
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(out)
 }
 
@@ -193,13 +208,8 @@ func convertResponsesResponseToOpenAI(body []byte) ([]byte, error) {
 // openai (chat completions) response → anthropic
 // ---------------------------------------------------------------------------
 
-func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
-	var resp map[string]any
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, err
-	}
-
-	out := make(map[string]any)
+func convertOpenAIResponseMapToAnthropic(resp map[string]any) (map[string]any, error) {
+	out := make(map[string]any, 8)
 	out["id"] = prefixID(resp["id"], "msg_")
 	out["type"] = "message"
 	out["role"] = "assistant"
@@ -278,6 +288,18 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 		}
 	}
 
+	return out, nil
+}
+
+func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	out, err := convertOpenAIResponseMapToAnthropic(resp)
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(out)
 }
 
@@ -285,13 +307,8 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 // anthropic → openai (chat completions) response
 // ---------------------------------------------------------------------------
 
-func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
-	var resp map[string]any
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, err
-	}
-
-	out := make(map[string]any)
+func convertAnthropicResponseMapToOpenAI(resp map[string]any) (map[string]any, error) {
+	out := make(map[string]any, 8)
 	out["id"] = prefixID(resp["id"], "chatcmpl-")
 	out["object"] = "chat.completion"
 	out["created"] = time.Now().Unix()
@@ -369,6 +386,18 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 		}
 	}
 
+	return out, nil
+}
+
+func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	out, err := convertAnthropicResponseMapToOpenAI(resp)
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(out)
 }
 
@@ -376,27 +405,31 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 // responses → anthropic response
 // ---------------------------------------------------------------------------
 
-func convertResponsesResponseToAnthropic(body []byte) ([]byte, error) {
+func convertResponsesResponseMapToAnthropic(resp map[string]any) (map[string]any, error) {
 	// Convert via openai as intermediate
-	openaiBody, err := convertResponsesResponseToOpenAI(body)
+	openaiMap, err := convertResponsesResponseMapToOpenAI(resp)
 	if err != nil {
 		return nil, err
 	}
-	return convertOpenAIResponseToAnthropic(openaiBody)
+	return convertOpenAIResponseMapToAnthropic(openaiMap)
 }
+
+
 
 // ---------------------------------------------------------------------------
 // anthropic → responses response
 // ---------------------------------------------------------------------------
 
-func convertAnthropicResponseToResponses(body []byte) ([]byte, error) {
+func convertAnthropicResponseMapToResponses(resp map[string]any) (map[string]any, error) {
 	// Convert via openai as intermediate
-	openaiBody, err := convertAnthropicResponseToOpenAI(body)
+	openaiMap, err := convertAnthropicResponseMapToOpenAI(resp)
 	if err != nil {
 		return nil, err
 	}
-	return convertOpenAIResponseToResponses(openaiBody)
+	return convertOpenAIResponseMapToResponses(openaiMap)
 }
+
+
 
 // ---------------------------------------------------------------------------
 // helpers

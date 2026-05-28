@@ -19,6 +19,7 @@ type TransformingWriter struct {
 	http.ResponseWriter
 	converter   *Converter
 	buf         *bytes.Buffer
+	streamBuf   *bytes.Buffer // accumulates partial SSE lines across Write calls
 	wroteHeader bool
 	isStreaming bool
 }
@@ -29,6 +30,7 @@ func NewTransformingWriter(w http.ResponseWriter, converter *Converter) *Transfo
 		ResponseWriter: w,
 		converter:      converter,
 		buf:            &bytes.Buffer{},
+		streamBuf:      &bytes.Buffer{},
 	}
 }
 
@@ -78,74 +80,96 @@ func (w *TransformingWriter) Flush() {
 
 	body := w.buf.Bytes()
 
-	// Check if response is JSON
+	// Check if it looks like JSON
 	contentType := w.Header().Get("Content-Type")
 	if !strings.Contains(contentType, "application/json") && !json.Valid(body) {
-		// Not JSON, pass through as-is
 		w.ResponseWriter.Write(body)
 		return
 	}
 
-	// Check if it's an error response
-	var peek map[string]any
-	if err := json.Unmarshal(body, &peek); err != nil {
+	// Single parse for the entire response
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		w.ResponseWriter.Write(body)
+		return
+	}
+	// Pass through error responses as-is — converting them via the success
+	// path would produce a nonsensical response shape.
+	if _, hasError := parsed["error"]; hasError {
 		w.ResponseWriter.Write(body)
 		return
 	}
 
-	// Check for error objects and convert them too
-	if _, hasError := peek["error"]; hasError {
-		convertedErr := w.convertError(body)
-		if convertedErr != nil {
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(convertedErr)))
-			w.ResponseWriter.Write(convertedErr)
-			return
-		}
-	}
-
-	converted, err := w.converter.ConvertResponse(body)
+	// Convert using the pre-parsed map (no redundant parse)
+	converted, err := w.converter.ConvertResponseMap(parsed)
 	if err != nil {
-		// Conversion failed, write original
 		w.ResponseWriter.Write(body)
 		return
 	}
 
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(converted)))
-	w.ResponseWriter.Write(converted)
+	result, err := json.Marshal(converted)
+	if err != nil {
+		w.ResponseWriter.Write(body)
+		return
+	}
+
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(result)))
+	w.ResponseWriter.Write(result)
 }
 
 // writeStream processes SSE data for streaming conversion.
+// It accumulates data in streamBuf and scans for complete lines,
+// reusing the buffer across Write calls to handle partial lines.
 func (w *TransformingWriter) writeStream(data []byte) (int, error) {
-	// SSE format: lines of "data: <json>\n" or "event: <type>\n"
-	// We need to parse the "data: " lines and convert them.
-	// We must handle partial lines (data may arrive in chunks).
+	// Safety limit: if streamBuf has grown beyond 10MB without a newline,
+	// the upstream is sending garbage — flush and reset to prevent OOM.
+	const maxStreamBufSize = 10 << 20
+	if w.streamBuf.Len()+len(data) > maxStreamBufSize {
+		w.streamBuf.Reset()
+	}
+	w.streamBuf.Write(data)
 
-	scanner := bufio.NewScanner(bytes.NewReader(data))
 	var outBuf bytes.Buffer
+	buf := w.streamBuf.Bytes()
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	// Find complete lines (terminated by \n)
+	for {
+		idx := bytes.IndexByte(buf, '\n')
+		if idx < 0 {
+			break // No complete line, wait for more data
+		}
 
-		// Handle "data: " lines
-		if strings.HasPrefix(line, "data: ") {
-			payload := strings.TrimPrefix(line, "data: ")
+		line := buf[:idx]
+		buf = buf[idx+1:]
 
-			if payload == "[DONE]" {
-				converted, err := w.converter.FormatStreamLine([]byte("[DONE]"))
-				if err == nil && converted != nil {
-					outBuf.Write(converted)
-				}
-				continue
-			}
+		// Trim \r for \r\n line endings
+		line = bytes.TrimRight(line, "\r")
 
-			converted, err := w.converter.FormatStreamLine([]byte(payload))
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			// Non-"data: " lines (empty lines, event type lines, etc.) are skipped.
+			continue
+		}
+
+		payload := bytes.TrimPrefix(line, []byte("data: "))
+
+		if string(payload) == "[DONE]" {
+			converted, err := w.converter.FormatStreamLine([]byte("[DONE]"))
 			if err == nil && converted != nil {
 				outBuf.Write(converted)
 			}
 			continue
 		}
 
-		// Non-"data: " lines (empty lines, event type lines, etc.) are skipped.
+		converted, err := w.converter.FormatStreamLine(payload)
+		if err == nil && converted != nil {
+			outBuf.Write(converted)
+		}
+	}
+
+	// Keep any remaining partial line in streamBuf
+	w.streamBuf.Reset()
+	if len(buf) > 0 {
+		w.streamBuf.Write(buf)
 	}
 
 	if outBuf.Len() > 0 {
@@ -158,39 +182,13 @@ func (w *TransformingWriter) writeStream(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// convertError attempts to convert an error response between formats.
-func (w *TransformingWriter) convertError(body []byte) []byte {
-	var errResp map[string]any
-	if err := json.Unmarshal(body, &errResp); err != nil {
-		return nil
-	}
 
-	// Anthropic error: {"type":"error","error":{"type":"...","message":"..."}}
-	if errObj, ok := errResp["error"].(map[string]any); ok {
-		if errResp["type"] == "error" {
-			// Convert Anthropic error to OpenAI format
-			msg, _ := errObj["message"].(string)
-			errType, _ := errObj["type"].(string)
-			result, err := json.Marshal(map[string]any{
-				"error": map[string]any{
-					"message": msg,
-					"type":    errType,
-				},
-			})
-			if err != nil {
-				return nil
-			}
-			return result
-		}
-	}
 
-	return nil
-}
 
 // Hijack implements the http.Hijacker interface for WebSocket support.
 func (w *TransformingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
 		return hj.Hijack()
 	}
-	return nil, nil, fmt.Errorf("ResponseWriter does not implement http.Hijacker")
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }
