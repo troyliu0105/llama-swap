@@ -91,6 +91,12 @@
             "default": 120,
             "description": "Number of seconds to wait for a model to be ready to serve requests."
         },
+        "shutdownTimeout": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 10,
+            "description": "Number of seconds to wait for in-flight requests to complete during shutdown before forcefully terminating upstream processes."
+        },
         "globalTTL": {
             "type": "integer",
             "minimum": 0,
@@ -547,13 +553,22 @@
                         "default": {},
                         "description": "Dictionary of filter settings for peer requests. Supports stripParams and setParams."
                     },
-                    "headers": {
+                    "addHeaders": {
                         "type": "object",
                         "additionalProperties": {
                             "type": "string"
                         },
                         "default": {},
-                        "description": "Dictionary of header overrides for peer requests. Non-empty string sets/overrides header. Empty string deletes header."
+                        "description": "Add or override headers sent to this peer. Sets header values on outgoing requests."
+                    },
+                    "removeHeaders": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "default": [],
+                        "description": "Remove headers from requests sent to this peer. Removes headers by name, including X-Forwarded-For which is automatically injected by the reverse proxy."
                     },
                     "maxConcurrent": {
                         "type": "integer",
@@ -591,6 +606,57 @@
                         "type": "boolean",
                         "default": false,
                         "description": "Prefix model names with peer ID (e.g., peer1/model-a). Useful to disambiguate models with the same name across different peers."
+                    },
+                    "upstreamFormat": {
+                        "type": "string",
+                        "enum": ["openai", "responses", "anthropic"],
+                        "default": "openai",
+                        "description": "Specifies the wire format the upstream server expects. When set, incoming requests in a different format are auto-converted. Values: 'openai' (default), 'responses', 'anthropic'."
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["", "codex"],
+                        "default": "",
+                        "description": "Peer type. Set to 'codex' for OpenAI Codex backend with OAuth-based authentication and multi-account load balancing."
+                    },
+                    "codex": {
+                        "type": "object",
+                        "description": "Codex-specific configuration. Only used when peer type is 'codex'.",
+                        "properties": {
+                            "accounts": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["name"],
+                                    "properties": {
+                                        "name": {
+                                            "type": "string",
+                                            "minLength": 1,
+                                            "description": "Name of the Codex account. Must be authenticated via 'llama-swap codex-login --account <name>'."
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                },
+                                "minItems": 1,
+                                "description": "List of named accounts for load balancing. Each account must be authenticated via 'llama-swap codex-login --account <name>'."
+                            },
+                            "loadBalance": {
+                                "type": "object",
+                                "properties": {
+                                    "strategy": {
+                                        "type": "string",
+                                        "enum": ["cache-hit", "round-robin", "sticky"],
+                                        "default": "cache-hit",
+                                        "description": "Account selection strategy. 'cache-hit': routes to accounts with highest cache-hit rates. 'round-robin': simple round-robin distribution. 'sticky': always use the same account."
+                                    }
+                                },
+                                "additionalProperties": false,
+                                "default": {},
+                                "description": "Controls how accounts are selected for requests."
+                            }
+                        },
+                        "required": ["accounts"],
+                        "additionalProperties": false
                     },
                     "timeouts": {
                         "type": "object",
@@ -633,6 +699,11 @@
             },
             "default": {},
             "description": "A dictionary of remote peers and models they provide. Peers can be another llama-swap or any server that provides the /v1/ generative API endpoints supported by llama-swap."
+        },
+        "prefixPeerModels": {
+            "type": "boolean",
+            "default": false,
+            "description": "Prefix peer model names with their peer ID (e.g., openrouter/llama-3.1). Can be overridden per-peer. Useful to disambiguate models with the same name across different peers."
         }
     },
     "allOf": [

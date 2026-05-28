@@ -507,6 +507,15 @@ peers:
       tlsHandshake: 10
       idleConn: 90
 
+    # upstreamFormat: specifies the wire format the upstream server expects
+    # - optional, default: "openai"
+    # - when set, incoming requests in a different format are auto-converted
+    # - for example, if upstreamFormat is "responses", OpenAI chat/completions
+    #   requests will be converted to the Responses API format before forwarding
+    # - valid values: "openai", "responses", "anthropic"
+    # - useful for proxying to backends that only speak a specific API format
+    upstreamFormat: openai
+
     # filters: a dictionary of filter settings for peer requests
     # - optional, default: empty dictionary
     # - same capabilities as model filters (stripParams, setParams)
