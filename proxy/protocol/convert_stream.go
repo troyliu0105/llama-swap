@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -566,10 +567,63 @@ func convertAnthropicStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 // ---------------------------------------------------------------------------
 
 func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
-	if string(data) == "[DONE]" {
-		return json.Marshal(map[string]any{
+	var events []string
+	appendEvent := func(event map[string]any) {
+		b, _ := json.Marshal(event)
+		events = append(events, string(b))
+	}
+	closeCurrentBlock := func() {
+		if c.currentBlockType == "" {
+			return
+		}
+		appendEvent(map[string]any{
+			"type":  "content_block_stop",
+			"index": c.currentBlockIndex,
+		})
+		c.currentBlockType = ""
+		c.currentBlockIndex = -1
+	}
+	emitTerminal := func(usage map[string]any) {
+		if c.streamFinished {
+			return
+		}
+		stopReason := c.pendingStopReason
+		if stopReason == "" {
+			stopReason = "end_turn"
+		}
+		appendEvent(map[string]any{
+			"type": "message_delta",
+			"delta": map[string]any{
+				"stop_reason":   stopReason,
+				"stop_sequence": nil,
+			},
+			"usage": usage,
+		})
+		appendEvent(map[string]any{
 			"type": "message_stop",
 		})
+		c.streamFinished = true
+	}
+	returnEvents := func() []byte {
+		if len(events) == 0 {
+			return nil
+		}
+		return []byte(strings.Join(events, "\n"))
+	}
+
+	if string(data) == "[DONE]" {
+		if c.streamFinished {
+			return nil, nil
+		}
+		if c.pendingStopReason != "" {
+			emitTerminal(map[string]any{"output_tokens": 0})
+			return returnEvents(), nil
+		}
+		appendEvent(map[string]any{
+			"type": "message_stop",
+		})
+		c.streamFinished = true
+		return returnEvents(), nil
 	}
 
 	var chunk map[string]any
@@ -579,8 +633,15 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 
 	choices, _ := chunk["choices"].([]any)
 	if len(choices) == 0 {
+		if c.streamFinished {
+			return nil, nil
+		}
 		if usage, ok := chunk["usage"].(map[string]any); ok && usage != nil {
-			return json.Marshal(map[string]any{
+			if c.pendingStopReason != "" {
+				emitTerminal(convertOpenAIUsageToAnthropic(usage))
+				return returnEvents(), nil
+			}
+			appendEvent(map[string]any{
 				"type": "message_delta",
 				"delta": map[string]any{
 					"stop_reason":   "end_turn",
@@ -588,6 +649,7 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 				},
 				"usage": convertOpenAIUsageToAnthropic(usage),
 			})
+			return returnEvents(), nil
 		}
 		return data, nil
 	}
@@ -602,12 +664,6 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 
 	if delta == nil && finishReason == "" {
 		return nil, nil
-	}
-
-	var events []string
-	appendEvent := func(event map[string]any) {
-		b, _ := json.Marshal(event)
-		events = append(events, string(b))
 	}
 
 	// First chunk with role → message_start (emit exactly once)
@@ -629,20 +685,24 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 
 		// Thinking content delta
 		if reasoningContent, ok := delta["reasoning_content"].(string); ok && reasoningContent != "" {
-			if !c.thinkingBlockStarted {
-				c.thinkingBlockStarted = true
+			if c.currentBlockType != "thinking" {
+				closeCurrentBlock()
+				blockIndex := c.blockCount
 				appendEvent(map[string]any{
 					"type":  "content_block_start",
-					"index": 0,
+					"index": blockIndex,
 					"content_block": map[string]any{
 						"type":     "thinking",
 						"thinking": "",
 					},
 				})
+				c.blockCount++
+				c.currentBlockType = "thinking"
+				c.currentBlockIndex = blockIndex
 			}
 			appendEvent(map[string]any{
 				"type":  "content_block_delta",
-				"index": 0,
+				"index": c.currentBlockIndex,
 				"delta": map[string]any{
 					"type":     "thinking_delta",
 					"thinking": reasoningContent,
@@ -652,30 +712,24 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 
 		// Text content delta
 		if content, ok := delta["content"].(string); ok && content != "" {
-			textBlockIndex := 0
-			if c.thinkingBlockStarted {
-				textBlockIndex = 1
-			}
-			if !c.textBlockStarted {
-				if c.thinkingBlockStarted {
-					appendEvent(map[string]any{
-						"type":  "content_block_stop",
-						"index": 0,
-					})
-				}
-				c.textBlockStarted = true
+			if c.currentBlockType != "text" {
+				closeCurrentBlock()
+				blockIndex := c.blockCount
 				appendEvent(map[string]any{
 					"type":  "content_block_start",
-					"index": textBlockIndex,
+					"index": blockIndex,
 					"content_block": map[string]any{
 						"type": "text",
 						"text": "",
 					},
 				})
+				c.blockCount++
+				c.currentBlockType = "text"
+				c.currentBlockIndex = blockIndex
 			}
 			appendEvent(map[string]any{
 				"type":  "content_block_delta",
-				"index": textBlockIndex,
+				"index": c.currentBlockIndex,
 				"delta": map[string]any{
 					"type": "text_delta",
 					"text": content,
@@ -683,27 +737,52 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 			})
 		}
 
-		// Tool calls delta
+		// Tool calls delta — buffer for deferred emission at finish.
 		if toolCalls, ok := delta["tool_calls"].([]any); ok && len(toolCalls) > 0 {
-			tcMap, _ := toolCalls[0].(map[string]any)
-			if tcMap != nil {
-				fn, _ := tcMap["function"].(map[string]any)
-				if fn != nil {
-					args, _ := fn["arguments"].(string)
-					appendEvent(map[string]any{
-						"type":  "content_block_delta",
-						"index": 1,
-						"delta": map[string]any{
-							"type":         "input_json_delta",
-							"partial_json": args,
-						},
-					})
+			if c.toolCallBuffers == nil {
+				c.toolCallBuffers = make(map[int]*toolCallBuf)
+			}
+
+			if c.currentBlockType != "" {
+				closeCurrentBlock()
+			}
+
+			for _, toolCall := range toolCalls {
+				tcMap, _ := toolCall.(map[string]any)
+				if tcMap == nil {
+					continue
+				}
+
+				openAIIndex := 0
+				switch index := tcMap["index"].(type) {
+				case float64:
+					openAIIndex = int(index)
+				case int:
+					openAIIndex = index
+				}
+
+				buf, exists := c.toolCallBuffers[openAIIndex]
+				if !exists {
+					buf = &toolCallBuf{}
+					c.toolCallBuffers[openAIIndex] = buf
+				}
+
+				if id, ok := tcMap["id"].(string); ok && id != "" {
+					buf.id = id
+				}
+				if fn, ok := tcMap["function"].(map[string]any); ok {
+					if name, ok := fn["name"].(string); ok && name != "" {
+						buf.name = name
+					}
+					if args, ok := fn["arguments"].(string); ok && args != "" {
+						buf.args.WriteString(args)
+					}
 				}
 			}
 		}
 	}
 
-	// Finish reason → message_delta
+	// Finish reason → close content, emit buffered tool_use blocks, and defer terminal events.
 	if finishReason != "" {
 		stopReason := "end_turn"
 		switch finishReason {
@@ -713,47 +792,59 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 			stopReason = "tool_use"
 		}
 
-		if c.textBlockStarted {
-			textBlockIndex := 0
-			if c.thinkingBlockStarted {
-				textBlockIndex = 1
+		closeCurrentBlock()
+
+		if len(c.toolCallBuffers) > 0 {
+			indices := make([]int, 0, len(c.toolCallBuffers))
+			for index := range c.toolCallBuffers {
+				indices = append(indices, index)
 			}
-			appendEvent(map[string]any{
-				"type":  "content_block_stop",
-				"index": textBlockIndex,
-			})
-		} else if c.thinkingBlockStarted {
-			appendEvent(map[string]any{
-				"type":  "content_block_stop",
-				"index": 0,
-			})
-		} else {
-			appendEvent(map[string]any{
-				"type":  "content_block_stop",
-				"index": 0,
-			})
+			sort.Ints(indices)
+
+			for _, openAIIndex := range indices {
+				buf := c.toolCallBuffers[openAIIndex]
+				blockIndex := c.blockCount
+
+				toolID := buf.id
+				if toolID == "" {
+					toolID = "toolu_protocol"
+				}
+
+				appendEvent(map[string]any{
+					"type":  "content_block_start",
+					"index": blockIndex,
+					"content_block": map[string]any{
+						"type":  "tool_use",
+						"id":    toolID,
+						"name":  buf.name,
+						"input": map[string]any{},
+					},
+				})
+
+				if buf.args.Len() > 0 {
+					appendEvent(map[string]any{
+						"type":  "content_block_delta",
+						"index": blockIndex,
+						"delta": map[string]any{
+							"type":         "input_json_delta",
+							"partial_json": buf.args.String(),
+						},
+					})
+				}
+
+				appendEvent(map[string]any{
+					"type":  "content_block_stop",
+					"index": blockIndex,
+				})
+
+				c.blockCount++
+			}
 		}
 
-		appendEvent(map[string]any{
-			"type": "message_delta",
-			"delta": map[string]any{
-				"stop_reason":   stopReason,
-				"stop_sequence": nil,
-			},
-			"usage": map[string]any{
-				"output_tokens": 0,
-			},
-		})
-
-		appendEvent(map[string]any{
-			"type": "message_stop",
-		})
+		c.pendingStopReason = stopReason
 	}
 
-	if len(events) == 0 {
-		return nil, nil
-	}
-	return []byte(strings.Join(events, "\n")), nil
+	return returnEvents(), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -769,7 +860,7 @@ func convertResponsesStreamToAnthropic(c *Converter, data []byte) ([]byte, error
 	if openaiData == nil {
 		return nil, nil
 	}
-	return convertOpenAIStreamToAnthropic(c, openaiData)
+	return convertViaLines(c, openaiData, convertOpenAIStreamToAnthropic)
 }
 
 // ---------------------------------------------------------------------------
@@ -785,10 +876,30 @@ func convertAnthropicStreamToResponses(c *Converter, data []byte) ([]byte, error
 	if openaiData == nil {
 		return nil, nil
 	}
-	if string(openaiData) == "[DONE]" {
-		return convertOpenAIStreamToResponses(c, openaiData)
+	return convertViaLines(c, openaiData, convertOpenAIStreamToResponses)
+}
+
+// convertViaLines splits multi-line intermediate output and converts each line.
+func convertViaLines(c *Converter, data []byte, fn func(*Converter, []byte) ([]byte, error)) ([]byte, error) {
+	lines := strings.Split(string(data), "\n")
+	var results []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		converted, err := fn(c, []byte(line))
+		if err != nil {
+			return nil, err
+		}
+		if converted != nil {
+			results = append(results, string(converted))
+		}
 	}
-	return convertOpenAIStreamToResponses(c, openaiData)
+	if len(results) == 0 {
+		return nil, nil
+	}
+	return []byte(strings.Join(results, "\n")), nil
 }
 
 // FormatStreamEvents takes raw SSE data lines and converts them.

@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -974,6 +975,32 @@ func containsSubstring(s, substr string) bool {
 	return false
 }
 
+func mustMarshal(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("<marshal error: %v>", err)
+	}
+	return string(b)
+}
+
+func appendAnthropicStreamEvents(t *testing.T, events *[]map[string]any, label string, data []byte) {
+	t.Helper()
+	if data == nil {
+		t.Fatalf("%s: expected non-nil result", label)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("%s: failed to unmarshal event %q: %v", label, line, err)
+		}
+		*events = append(*events, event)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Hardening regression tests
 // ---------------------------------------------------------------------------
@@ -1138,6 +1165,12 @@ func TestConvertOpenAIStreamToAnthropic_ReasoningContent(t *testing.T) {
 		t.Fatalf("chunk4: unexpected error: %v", err)
 	}
 	appendEvents("chunk4", result)
+
+	doneResult, err := convertOpenAIStreamToAnthropic(c, []byte(`[DONE]`))
+	if err != nil {
+		t.Fatalf("done: unexpected error: %v", err)
+	}
+	appendEvents("done", doneResult)
 
 	wantTypes := []string{
 		"message_start",
@@ -1617,4 +1650,567 @@ func TestConvertOpenAIStreamToResponses_ReasoningContent(t *testing.T) {
 	if !contains(result, "input_tokens") {
 		t.Errorf("chunk4: missing usage data in response.completed: %s", string(result))
 	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_ToolCalls(t *testing.T) {
+	// Scenario: thinking + text + tool_use
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Let me think"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","content":"I'll search for you."},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"web_search","arguments":"{\"query\":"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"\"latest news\"}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	assertEventTypes(t, events, wantTypes)
+
+	toolStart, _ := events[7]["content_block"].(map[string]any)
+	if events[7]["index"] != float64(2) || toolStart["type"] != "tool_use" {
+		t.Errorf("tool_use start mismatch: %s", mustMarshal(events[7]))
+	}
+	if toolStart["id"] != "call_abc123" || toolStart["name"] != "web_search" {
+		t.Errorf("tool_use id/name mismatch: %s", mustMarshal(events[7]))
+	}
+	toolInput, _ := toolStart["input"].(map[string]any)
+	if len(toolInput) != 0 {
+		t.Errorf("tool_use block input = %v, want empty object: %s", toolInput, mustMarshal(events[7]))
+	}
+	toolDelta, _ := events[8]["delta"].(map[string]any)
+	if events[8]["index"] != float64(2) || toolDelta["type"] != "input_json_delta" || toolDelta["partial_json"] != `{"query":"latest news"}` {
+		t.Errorf("tool delta mismatch: %s", mustMarshal(events[8]))
+	}
+	messageDelta, _ := events[10]["delta"].(map[string]any)
+	if messageDelta["stop_reason"] != "tool_use" {
+		t.Errorf("stop_reason = %v, want tool_use: %s", messageDelta["stop_reason"], mustMarshal(events[10]))
+	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_ToolCallsTextOnly(t *testing.T) {
+	// Scenario: text + tool_use (no thinking)
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Searching now."},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_xyz","type":"function","function":{"name":"search","arguments":"{\"q\":"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	assertEventTypes(t, events, wantTypes)
+
+	toolStart, _ := events[4]["content_block"].(map[string]any)
+	if events[4]["index"] != float64(1) || toolStart["type"] != "tool_use" {
+		t.Errorf("tool_use start mismatch: %s", mustMarshal(events[4]))
+	}
+	toolDelta, _ := events[5]["delta"].(map[string]any)
+	if events[5]["index"] != float64(1) || toolDelta["type"] != "input_json_delta" || toolDelta["partial_json"] != `{"q":` {
+		t.Errorf("tool delta mismatch: %s", mustMarshal(events[5]))
+	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_ToolCallsOnly(t *testing.T) {
+	// Scenario: tool_use only (no thinking, no text)
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_direct","type":"function","function":{"name":"lookup","arguments":"{\"key\":"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	assertEventTypes(t, events, wantTypes)
+
+	toolStart, _ := events[1]["content_block"].(map[string]any)
+	if events[1]["index"] != float64(0) || toolStart["type"] != "tool_use" {
+		t.Errorf("tool_use start mismatch: %s", mustMarshal(events[1]))
+	}
+	if toolStart["name"] != "lookup" || toolStart["id"] != "call_direct" {
+		t.Errorf("tool_use id/name mismatch: %s", mustMarshal(events[1]))
+	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_ToolCallsMissingID(t *testing.T) {
+	// Verify missing tool call id gets a fallback
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"type":"function","function":{"name":"search","arguments":"{}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	for _, evt := range events {
+		if evt["type"] == "content_block_start" {
+			block, _ := evt["content_block"].(map[string]any)
+			if block["type"] == "tool_use" {
+				if block["id"] != "toolu_protocol" {
+					t.Errorf("missing id fallback: got %v, want toolu_protocol: %s", block["id"], mustMarshal(evt))
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("no tool_use content_block_start found in events")
+}
+
+func TestConvertOpenAIStreamToAnthropic_MultipleToolCalls(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"call_time","type":"function","function":{"name":"get_time","arguments":"{\"zone\":\"UTC\"}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	assertEventTypes(t, events, wantTypes)
+
+	firstToolStart, _ := events[1]["content_block"].(map[string]any)
+	secondToolStart, _ := events[4]["content_block"].(map[string]any)
+	if events[1]["index"] != float64(0) || firstToolStart["type"] != "tool_use" || firstToolStart["name"] != "get_weather" {
+		t.Errorf("first tool start mismatch: %s", mustMarshal(events[1]))
+	}
+	if events[4]["index"] != float64(1) || secondToolStart["type"] != "tool_use" || secondToolStart["name"] != "get_time" {
+		t.Errorf("second tool start mismatch: %s", mustMarshal(events[4]))
+	}
+	firstDelta, _ := events[2]["delta"].(map[string]any)
+	secondDelta, _ := events[5]["delta"].(map[string]any)
+	if firstDelta["partial_json"] != `{"city":"Paris"}` {
+		t.Errorf("first tool args mismatch: %s", mustMarshal(events[2]))
+	}
+	if secondDelta["partial_json"] != `{"zone":"UTC"}` {
+		t.Errorf("second tool args mismatch: %s", mustMarshal(events[5]))
+	}
+	messageDelta, _ := events[7]["delta"].(map[string]any)
+	if messageDelta["stop_reason"] != "tool_use" {
+		t.Errorf("stop_reason = %v, want tool_use: %s", messageDelta["stop_reason"], mustMarshal(events[7]))
+	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_TextAfterToolCalls(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":"{}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Found it."},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	assertEventTypes(t, events, wantTypes)
+
+	textStart, _ := events[1]["content_block"].(map[string]any)
+	textDelta, _ := events[2]["delta"].(map[string]any)
+	toolStart, _ := events[4]["content_block"].(map[string]any)
+	if events[1]["index"] != float64(0) || textStart["type"] != "text" {
+		t.Errorf("text start mismatch: %s", mustMarshal(events[1]))
+	}
+	if events[2]["index"] != float64(0) || textDelta["type"] != "text_delta" || textDelta["text"] != "Found it." {
+		t.Errorf("text delta mismatch: %s", mustMarshal(events[2]))
+	}
+	if events[3]["index"] != float64(0) {
+		t.Errorf("text stop should close index 0 before buffered tool starts: %s", mustMarshal(events[3]))
+	}
+	if events[4]["index"] != float64(1) || toolStart["type"] != "tool_use" {
+		t.Errorf("tool start mismatch: %s", mustMarshal(events[4]))
+	}
+	messageDelta, _ := events[7]["delta"].(map[string]any)
+	if messageDelta["stop_reason"] != "end_turn" {
+		t.Errorf("stop_reason = %v, want end_turn: %s", messageDelta["stop_reason"], mustMarshal(events[7]))
+	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_ThinkingTextMultipleTools(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"I should plan."},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","content":"I will use tools."},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"call_time","type":"function","function":{"name":"get_time","arguments":"{}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	assertEventTypes(t, events, wantTypes)
+
+	blockStarts := []struct {
+		eventIndex int
+		blockIndex float64
+		blockType  string
+	}{
+		{eventIndex: 1, blockIndex: 0, blockType: "thinking"},
+		{eventIndex: 4, blockIndex: 1, blockType: "text"},
+		{eventIndex: 7, blockIndex: 2, blockType: "tool_use"},
+		{eventIndex: 10, blockIndex: 3, blockType: "tool_use"},
+	}
+	for _, want := range blockStarts {
+		block, _ := events[want.eventIndex]["content_block"].(map[string]any)
+		if events[want.eventIndex]["index"] != want.blockIndex || block["type"] != want.blockType {
+			t.Errorf("block start at event %d mismatch: %s", want.eventIndex, mustMarshal(events[want.eventIndex]))
+		}
+	}
+
+	for _, want := range []struct {
+		eventIndex int
+		blockIndex float64
+	}{
+		{eventIndex: 3, blockIndex: 0},
+		{eventIndex: 6, blockIndex: 1},
+		{eventIndex: 9, blockIndex: 2},
+		{eventIndex: 12, blockIndex: 3},
+	} {
+		if events[want.eventIndex]["index"] != want.blockIndex {
+			t.Errorf("block stop at event %d mismatch: %s", want.eventIndex, mustMarshal(events[want.eventIndex]))
+		}
+	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_InterleavedToolCalls(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\""}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"call_time","type":"function","function":{"name":"get_time","arguments":"{\"zone\":\"UTC\"}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"Paris\"}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	assertEventTypes(t, events, wantTypes)
+	assertToolUseBlock(t, events, 1, 0, "call_weather", "get_weather", `{"city":"Paris"}`)
+	assertToolUseBlock(t, events, 4, 1, "call_time", "get_time", `{"zone":"UTC"}`)
+	messageDelta, _ := events[7]["delta"].(map[string]any)
+	if messageDelta["stop_reason"] != "tool_use" {
+		t.Errorf("stop_reason = %v, want tool_use: %s", messageDelta["stop_reason"], mustMarshal(events[7]))
+	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_MultiEntryToolChunk(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}},{"index":1,"id":"call_time","type":"function","function":{"name":"get_time","arguments":"{\"zone\":\"UTC\"}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	assertEventTypes(t, events, wantTypes)
+	assertToolUseBlock(t, events, 1, 0, "call_weather", "get_weather", `{"city":"Paris"}`)
+	assertToolUseBlock(t, events, 4, 1, "call_time", "get_time", `{"zone":"UTC"}`)
+}
+
+func TestConvertOpenAIStreamToAnthropic_StreamTermination(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello."},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	if countEvents(events, "message_stop") != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d: %s", countEvents(events, "message_stop"), mustMarshal(events))
+	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_StreamTerminationWithUsage(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatAnthropic}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello."},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToAnthropic(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendAnthropicStreamEventsIfAny(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	if countEvents(events, "message_delta") != 1 {
+		t.Fatalf("expected exactly one message_delta, got %d: %s", countEvents(events, "message_delta"), mustMarshal(events))
+	}
+	if countEvents(events, "message_stop") != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d: %s", countEvents(events, "message_stop"), mustMarshal(events))
+	}
+	var messageDelta map[string]any
+	for _, event := range events {
+		if event["type"] == "message_delta" {
+			messageDelta = event
+			break
+		}
+	}
+	if messageDelta == nil {
+		t.Fatalf("message_delta not found: %s", mustMarshal(events))
+	}
+	usage, _ := messageDelta["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(10) || usage["output_tokens"] != float64(20) {
+		t.Fatalf("message_delta usage = %s, want input_tokens=10 output_tokens=20", mustMarshal(usage))
+	}
+}
+
+func TestConvertResponsesStreamToAnthropic_MultiLineIntermediateUsage(t *testing.T) {
+	c := &Converter{From: FormatResponses, To: FormatAnthropic}
+	input := `{"type":"response.completed","response":{"id":"resp_123","status":"completed","model":"gpt-4","usage":{"input_tokens":10,"output_tokens":5}}}`
+	result, err := convertResponsesStreamToAnthropic(c, []byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var events []map[string]any
+	appendAnthropicStreamEvents(t, &events, "responses_to_anthropic", result)
+	assertEventTypes(t, events, []string{"message_delta", "message_stop"})
+	usage, _ := events[0]["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(10) || usage["output_tokens"] != float64(5) {
+		t.Fatalf("message_delta usage = %s, want input_tokens=10 output_tokens=5", mustMarshal(usage))
+	}
+}
+
+func TestConvertAnthropicStreamToResponses_MultiLineIntermediateUsage(t *testing.T) {
+	c := &Converter{From: FormatAnthropic, To: FormatResponses}
+	input := `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":7,"output_tokens":3}}`
+	result, err := convertAnthropicStreamToResponses(c, []byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !contains(result, "response.content_part.done") {
+		t.Fatalf("missing response.content_part.done: %s", string(result))
+	}
+	if !contains(result, "response.completed") {
+		t.Fatalf("missing response.completed from usage line: %s", string(result))
+	}
+	if !contains(result, "input_tokens") {
+		t.Fatalf("missing converted usage: %s", string(result))
+	}
+}
+
+func appendAnthropicStreamEventsIfAny(t *testing.T, events *[]map[string]any, label string, data []byte) {
+	t.Helper()
+	if data == nil {
+		return
+	}
+	appendAnthropicStreamEvents(t, events, label, data)
+}
+
+func assertEventTypes(t *testing.T, events []map[string]any, wantTypes []string) {
+	t.Helper()
+	if len(events) != len(wantTypes) {
+		t.Fatalf("expected %d events, got %d:\n%s", len(wantTypes), len(events), mustMarshal(events))
+	}
+	for i, wantType := range wantTypes {
+		if events[i]["type"] != wantType {
+			t.Fatalf("event %d type = %v, want %s: %s", i, events[i]["type"], wantType, mustMarshal(events[i]))
+		}
+	}
+}
+
+func assertToolUseBlock(t *testing.T, events []map[string]any, startEventIndex int, blockIndex float64, id, name, args string) {
+	t.Helper()
+	start := events[startEventIndex]
+	delta := events[startEventIndex+1]
+	stop := events[startEventIndex+2]
+	block, _ := start["content_block"].(map[string]any)
+	if start["index"] != blockIndex || block["type"] != "tool_use" || block["id"] != id || block["name"] != name {
+		t.Errorf("tool_use start mismatch: %s", mustMarshal(start))
+	}
+	deltaData, _ := delta["delta"].(map[string]any)
+	if delta["index"] != blockIndex || deltaData["type"] != "input_json_delta" || deltaData["partial_json"] != args {
+		t.Errorf("tool_use delta mismatch: %s", mustMarshal(delta))
+	}
+	if stop["index"] != blockIndex {
+		t.Errorf("tool_use stop mismatch: %s", mustMarshal(stop))
+	}
+}
+
+func countEvents(events []map[string]any, eventType string) int {
+	count := 0
+	for _, event := range events {
+		if event["type"] == eventType {
+			count++
+		}
+	}
+	return count
 }
