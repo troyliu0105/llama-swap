@@ -28,8 +28,13 @@ When a peer model is configured with `upstreamFormat`, llama-swap can translate 
 ### Supported Well
 
 - String and message-array input for standard conversational use
+- Deprecated Chat `functions` / `function_call` compatibility when bridging from Chat requests
+- Ordered aggregation of multiple Chat `system` / `developer` instruction messages when bridging from Chat requests
 - Function tool definitions and tool-choice mapping
+- Portable file/document request conversion on the supported request paths
 - Assistant text output and function-call output items on the common paths
+- Non-streaming refusal preservation on the supported response paths
+- Refusal streaming on the supported Responses → Chat bridge
 - Streamed text, reasoning, and tool-call argument deltas
 - Usage conversion for supported response and stream shapes
 
@@ -37,7 +42,7 @@ When a peer model is configured with `upstreamFormat`, llama-swap can translate 
 
 - Responses-native built-in tools such as hosted web/file/code/MCP tools are not converted into other protocols.
 - Some Responses output item families have no equivalent in Chat Completions or Anthropic Messages and are therefore not preserved losslessly.
-- Multimodal and long-tail typed content support is incomplete across conversions.
+- Multimodal and long-tail typed content support is incomplete across conversions, and malformed file/content payloads are rejected explicitly.
 - Unknown semantic stream events are dropped during conversion instead of being forwarded as mixed-protocol payloads.
 
 ## Request Body
@@ -867,9 +872,10 @@ llama.cpp provides partial compatibility with the Responses API through an inter
 **What does not work:**
 
 - `previous_response_id` is not supported. There is no server-side state.
-- `input_file` content parts are rejected.
-- Built-in tools (`web_search`, `file_search`, `code_interpreter`, `mcp`) are skipped. Only `function` tools are converted.
+- `input_file` content parts are supported only when they contain a real payload or reference (`file_url`, `file_data`, or `file_id`). Malformed, empty, or wrong-typed file parts are rejected explicitly.
+- Built-in tools (`web_search`, `file_search`, `code_interpreter`, `mcp`) are not converted. Only `function` tools are converted, and native tool families are rejected explicitly instead of being skipped.
 - The conversion shim may not preserve all response fields exactly as the OpenAI API returns them.
+- Many protocol-specific streaming lifecycle events still have no direct Chat or Messages equivalent and remain intentionally dropped.
 
 ## llama-swap Proxy Notes
 

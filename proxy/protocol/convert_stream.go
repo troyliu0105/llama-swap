@@ -67,6 +67,9 @@ func convertOpenAIStreamToResponses(c *Converter, data []byte) ([]byte, error) {
 	if choice == nil {
 		return nil, nil
 	}
+	if lp := choice["logprobs"]; lp != nil {
+		return nil, fmt.Errorf("openai chat stream logprobs cannot be converted to Responses API")
+	}
 
 	delta, _ := choice["delta"].(map[string]any)
 	finishReason, _ := choice["finish_reason"].(string)
@@ -547,6 +550,44 @@ func convertResponsesStreamToOpenAI(c *Converter, data []byte) ([]byte, error) {
 			},
 		})
 
+	case "response.refusal.delta":
+		delta, _ := evt["delta"].(string)
+		c.responseSawRefusalDelta = true
+		return json.Marshal(map[string]any{
+			"id":      "chatcmpl-protocol",
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"choices": []any{
+				map[string]any{
+					"index": 0,
+					"delta": map[string]any{
+						"refusal": delta,
+					},
+					"finish_reason": nil,
+				},
+			},
+		})
+
+	case "response.refusal.done":
+		if c.responseSawRefusalDelta {
+			return nil, nil
+		}
+		refusal, _ := evt["refusal"].(string)
+		return json.Marshal(map[string]any{
+			"id":      "chatcmpl-protocol",
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"choices": []any{
+				map[string]any{
+					"index": 0,
+					"delta": map[string]any{
+						"refusal": refusal,
+					},
+					"finish_reason": nil,
+				},
+			},
+		})
+
 	case "response.output_text.done":
 		// Ignore, we already sent the deltas
 		return nil, nil
@@ -615,14 +656,43 @@ func convertResponsesStreamToOpenAI(c *Converter, data []byte) ([]byte, error) {
 
 	case "response.created", "response.in_progress", "response.queued",
 		"response.content_part.added", "response.content_part.done",
-		"response.refusal.delta", "response.refusal.done",
 		"response.reasoning_text.done":
 		// These events don't have direct OpenAI equivalents, skip them
 		return nil, nil
 
+	case "response.reasoning_summary_part.added",
+		"response.reasoning_summary_part.done",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.output_text.annotation.added":
+		return nil, fmt.Errorf("responses stream event %q cannot be converted to OpenAI Chat Completions", evtType)
+
 	default:
+		if isUnsupportedResponsesSemanticStreamEvent(evtType) {
+			return nil, fmt.Errorf("responses stream event %q cannot be converted to OpenAI Chat Completions", evtType)
+		}
 		return nil, nil
 	}
+}
+
+func isUnsupportedResponsesSemanticStreamEvent(evtType string) bool {
+	for _, prefix := range []string{
+		"response.web_search_call.",
+		"response.file_search_call.",
+		"response.code_interpreter_call.",
+		"response.image_generation_call.",
+		"response.image_gen_call.",
+		"response.mcp_",
+		"response.audio.",
+		"response.audio_transcript.",
+		"response.computer_call.",
+		"response.custom_tool_call.",
+	} {
+		if strings.HasPrefix(evtType, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +785,9 @@ func convertAnthropicStreamToOpenAI(c *Converter, data []byte) ([]byte, error) {
 					},
 				},
 			})
+
+		default:
+			return nil, fmt.Errorf("anthropic stream delta type %q cannot be converted to OpenAI Chat Completions", deltaType)
 		}
 
 	case "message_delta":
@@ -821,10 +894,38 @@ func convertAnthropicStreamToOpenAI(c *Converter, data []byte) ([]byte, error) {
 		return nil, nil
 
 	default:
+		if isUnsupportedAnthropicSemanticStreamEvent(evtType) {
+			return nil, fmt.Errorf("anthropic stream event %q cannot be converted to OpenAI Chat Completions", evtType)
+		}
 		return nil, nil
 	}
 
 	return nil, nil
+}
+
+func isUnsupportedAnthropicSemanticStreamEvent(evtType string) bool {
+	if evtType == "error" {
+		return true
+	}
+	for _, prefix := range []string{
+		"server_tool_",
+		"web_search_",
+		"web_fetch_",
+		"code_execution_",
+		"mcp_",
+		"advisor_",
+		"tool_search_",
+	} {
+		if strings.HasPrefix(evtType, prefix) {
+			return true
+		}
+	}
+	for _, exact := range []string{"citations_delta", "signature_delta"} {
+		if evtType == exact {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -922,6 +1023,9 @@ func convertOpenAIStreamToAnthropic(c *Converter, data []byte) ([]byte, error) {
 	choice, _ := choices[0].(map[string]any)
 	if choice == nil {
 		return nil, nil
+	}
+	if lp := choice["logprobs"]; lp != nil {
+		return nil, fmt.Errorf("openai chat stream logprobs cannot be converted to Anthropic Messages")
 	}
 
 	delta, _ := choice["delta"].(map[string]any)

@@ -50,6 +50,7 @@ type Converter struct {
 	responseAwaitingCompletion bool
 	responsePendingTerminal    string
 	responseSawToolCall        bool
+	responseSawRefusalDelta    bool
 	responseToolIndexes        map[int]int
 	openAIIncludeUsage         bool
 }

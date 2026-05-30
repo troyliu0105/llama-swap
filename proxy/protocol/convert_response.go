@@ -20,26 +20,51 @@ func convertOpenAIResponseMapToResponses(resp map[string]any) (map[string]any, e
 
 	// Convert choices → output
 	var output []any
+	status := "completed"
+	var incompleteDetails map[string]any
 	if choices, ok := resp["choices"].([]any); ok && len(choices) > 0 {
+		if len(choices) > 1 {
+			return nil, fmt.Errorf("openai chat response choices cannot be converted to Responses when more than one choice is present")
+		}
 		for _, ch := range choices {
 			choice, ok := ch.(map[string]any)
 			if !ok {
 				continue
 			}
+			if _, ok := choice["logprobs"]; ok && choice["logprobs"] != nil {
+				return nil, fmt.Errorf("openai chat response logprobs cannot be converted to Responses")
+			}
 			msg, _ := choice["message"].(map[string]any)
 			if msg == nil {
 				continue
+			}
+			if finishReason, _ := choice["finish_reason"].(string); finishReason != "" {
+				switch finishReason {
+				case "length":
+					status = "incomplete"
+					incompleteDetails = map[string]any{"reason": "max_output_tokens"}
+				case "content_filter":
+					status = "incomplete"
+					incompleteDetails = map[string]any{"reason": "content_filter"}
+				}
 			}
 
 			// Text message
 			content := msg["content"]
 			contentStr, _ := content.(string)
+			refusalStr, _ := msg["refusal"].(string)
 
 			var contentParts []any
 			if contentStr != "" {
 				contentParts = append(contentParts, map[string]any{
 					"type": "output_text",
 					"text": contentStr,
+				})
+			}
+			if refusalStr != "" {
+				contentParts = append(contentParts, map[string]any{
+					"type":    "refusal",
+					"refusal": refusalStr,
 				})
 			}
 
@@ -82,7 +107,10 @@ func convertOpenAIResponseMapToResponses(resp map[string]any) (map[string]any, e
 	}
 
 	out["output"] = output
-	out["status"] = "completed"
+	out["status"] = status
+	if incompleteDetails != nil {
+		out["incomplete_details"] = incompleteDetails
+	}
 
 	if usage, ok := resp["usage"].(map[string]any); ok {
 		out["usage"] = convertOpenAIUsageToResponses(usage)
@@ -115,11 +143,19 @@ func convertResponsesResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 	out["object"] = "chat.completion"
 	out["created"] = time.Now().Unix()
 	out["model"] = resp["model"]
+	status, _ := resp["status"].(string)
+	switch status {
+	case "", "completed", "incomplete":
+	default:
+		return nil, fmt.Errorf("responses status %q cannot be converted to OpenAI Chat Completions", status)
+	}
 
 	var choices []any
 	finishReason := responsesStatusToOpenAIFinishReason(resp)
 	messageContent := ""
+	refusalText := ""
 	var toolCalls []any
+	messageItemCount := 0
 
 	if output, ok := resp["output"].([]any); ok {
 		for _, item := range output {
@@ -131,6 +167,10 @@ func convertResponsesResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 
 			switch itemType {
 			case "message":
+				messageItemCount++
+				if messageItemCount > 1 {
+					return nil, fmt.Errorf("responses multiple message output items cannot be converted to OpenAI Chat Completions")
+				}
 				if content, ok := itemMap["content"].([]any); ok {
 					for _, c := range content {
 						cMap, ok := c.(map[string]any)
@@ -138,9 +178,21 @@ func convertResponsesResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 							continue
 						}
 						if cMap["type"] == "output_text" {
+							if annotations, ok := cMap["annotations"].([]any); ok && len(annotations) > 0 {
+								return nil, fmt.Errorf("responses message content part annotations cannot be converted to OpenAI Chat Completions")
+							}
+							if logprobs, ok := cMap["logprobs"].([]any); ok && len(logprobs) > 0 {
+								return nil, fmt.Errorf("responses message content part logprobs cannot be converted to OpenAI Chat Completions")
+							}
 							if text, ok := cMap["text"].(string); ok {
 								messageContent += text
 							}
+						} else if cMap["type"] == "refusal" {
+							if refusal, ok := cMap["refusal"].(string); ok {
+								refusalText += refusal
+							}
+						} else {
+							return nil, fmt.Errorf("responses message content part type %q cannot be converted to OpenAI Chat Completions", cMap["type"])
 						}
 					}
 				}
@@ -154,6 +206,8 @@ func convertResponsesResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 						"arguments": itemMap["arguments"],
 					},
 				})
+			default:
+				return nil, fmt.Errorf("responses output item type %q cannot be converted to OpenAI Chat Completions", itemType)
 			}
 		}
 	}
@@ -161,6 +215,13 @@ func convertResponsesResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 	msg := map[string]any{
 		"role":    "assistant",
 		"content": messageContent,
+	}
+	if refusalText != "" {
+		msg["refusal"] = refusalText
+		msg["content"] = ""
+		if finishReason == "stop" {
+			finishReason = "content_filter"
+		}
 	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
@@ -209,8 +270,14 @@ func convertOpenAIResponseMapToAnthropic(resp map[string]any) (map[string]any, e
 	stopReason := "end_turn"
 
 	if choices, ok := resp["choices"].([]any); ok && len(choices) > 0 {
+		if len(choices) > 1 {
+			return nil, fmt.Errorf("openai chat response choices cannot be converted to Anthropic Messages when more than one choice is present")
+		}
 		choice, _ := choices[0].(map[string]any)
 		if choice != nil {
+			if _, ok := choice["logprobs"]; ok && choice["logprobs"] != nil {
+				return nil, fmt.Errorf("openai chat response logprobs cannot be converted to Anthropic Messages")
+			}
 			msg, _ := choice["message"].(map[string]any)
 			if msg != nil {
 				// Text content
@@ -219,6 +286,13 @@ func convertOpenAIResponseMapToAnthropic(resp map[string]any) (map[string]any, e
 						"type": "text",
 						"text": text,
 					})
+				}
+				if refusal, ok := msg["refusal"].(string); ok && refusal != "" {
+					content = append(content, map[string]any{
+						"type": "text",
+						"text": refusal,
+					})
+					stopReason = "refusal"
 				}
 
 				// Tool calls
@@ -246,7 +320,7 @@ func convertOpenAIResponseMapToAnthropic(resp map[string]any) (map[string]any, e
 			}
 
 			// Map finish_reason
-			if fr, ok := choice["finish_reason"].(string); ok {
+			if fr, ok := choice["finish_reason"].(string); ok && !(stopReason == "refusal" && fr == "stop") {
 				stopReason = openAIFinishReasonToAnthropicStopReason(fr)
 			}
 		}
@@ -295,6 +369,7 @@ func convertAnthropicResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 
 	finishReason := "stop"
 	messageContent := ""
+	refusalText := ""
 	var toolCalls []any
 
 	if content, ok := resp["content"].([]any); ok {
@@ -307,7 +382,11 @@ func convertAnthropicResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 			switch blockType {
 			case "text":
 				if text, ok := blockMap["text"].(string); ok {
-					messageContent += text
+					if sr, _ := resp["stop_reason"].(string); sr == "refusal" {
+						refusalText += text
+					} else {
+						messageContent += text
+					}
 				}
 			case "tool_use":
 				finishReason = "tool_calls"
@@ -320,6 +399,8 @@ func convertAnthropicResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 						"arguments": string(inputJSON),
 					},
 				})
+			default:
+				return nil, fmt.Errorf("anthropic content block type %q cannot be converted to OpenAI Chat Completions", blockType)
 			}
 		}
 	}
@@ -327,6 +408,13 @@ func convertAnthropicResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 	msg := map[string]any{
 		"role":    "assistant",
 		"content": messageContent,
+	}
+	if refusalText != "" {
+		msg["refusal"] = refusalText
+		msg["content"] = ""
+		if finishReason == "stop" {
+			finishReason = "content_filter"
+		}
 	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
@@ -383,12 +471,88 @@ func convertResponsesResponseMapToAnthropic(resp map[string]any) (map[string]any
 // ---------------------------------------------------------------------------
 
 func convertAnthropicResponseMapToResponses(resp map[string]any) (map[string]any, error) {
-	// Convert via openai as intermediate
-	openaiMap, err := convertAnthropicResponseMapToOpenAI(resp)
-	if err != nil {
-		return nil, err
+	out := make(map[string]any, 8)
+	out["id"] = prefixID(resp["id"], "resp_")
+	out["object"] = "response"
+	out["created_at"] = time.Now().Unix()
+	out["model"] = resp["model"]
+
+	status := "completed"
+	stopReason, _ := resp["stop_reason"].(string)
+	if stopReason == "refusal" {
+		status = "completed"
 	}
-	return convertOpenAIResponseMapToResponses(openaiMap)
+
+	var output []any
+	var pendingMessageContent []any
+	flushPendingMessage := func() {
+		if len(pendingMessageContent) == 0 {
+			return
+		}
+		output = append(output, map[string]any{
+			"type":    "message",
+			"id":      prefixID(nil, "msg_"),
+			"role":    "assistant",
+			"content": pendingMessageContent,
+		})
+		pendingMessageContent = nil
+	}
+	if content, ok := resp["content"].([]any); ok {
+		for _, block := range content {
+			blockMap, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			blockType, _ := blockMap["type"].(string)
+			switch blockType {
+			case "text":
+				text, _ := blockMap["text"].(string)
+				contentType := "output_text"
+				contentKey := "text"
+				if stopReason == "refusal" {
+					contentType = "refusal"
+					contentKey = "refusal"
+				}
+				pendingMessageContent = append(pendingMessageContent, map[string]any{
+					"type":     contentType,
+					contentKey: text,
+				})
+			case "tool_use":
+				flushPendingMessage()
+				inputJSON, _ := json.Marshal(blockMap["input"])
+				output = append(output, map[string]any{
+					"type":      "function_call",
+					"id":        blockMap["id"],
+					"call_id":   blockMap["id"],
+					"name":      blockMap["name"],
+					"arguments": string(inputJSON),
+				})
+			default:
+				return nil, fmt.Errorf("anthropic content block type %q cannot be converted to Responses", blockType)
+			}
+		}
+	}
+	flushPendingMessage()
+
+	if len(output) == 0 {
+		output = append(output, map[string]any{
+			"type":    "message",
+			"id":      prefixID(nil, "msg_"),
+			"role":    "assistant",
+			"content": []any{},
+		})
+	}
+
+	out["output"] = output
+	out["status"] = status
+
+	if usage, ok := resp["usage"].(map[string]any); ok {
+		openAIUsage := convertAnthropicUsageToOpenAI(usage)
+		out["usage"] = convertOpenAIUsageToResponses(openAIUsage)
+		copyFields(out, usage, "service_tier", "inference_geo")
+	}
+
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +705,8 @@ func openAIFinishReasonToAnthropicStopReason(reason string) string {
 		return "max_tokens"
 	case "tool_calls", "function_call":
 		return "tool_use"
+	case "content_filter":
+		return "refusal"
 	default:
 		return "end_turn"
 	}
@@ -552,6 +718,8 @@ func anthropicStopReasonToOpenAIFinishReason(reason string) string {
 		return "length"
 	case "tool_use":
 		return "tool_calls"
+	case "refusal":
+		return "content_filter"
 	default:
 		return "stop"
 	}

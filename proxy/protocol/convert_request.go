@@ -3,6 +3,10 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"mime"
+	"net/url"
+	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -13,6 +17,9 @@ import (
 func responsesToOpenAIRequest(body []byte) ([]byte, error) {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	if err := rejectResponsesStatefulRequestFields(req, "OpenAI Chat Completions"); err != nil {
 		return nil, err
 	}
 
@@ -114,6 +121,9 @@ func responsesToOpenAIRequest(body []byte) ([]byte, error) {
 	copyFields(out, req, "stream_options", "parallel_tool_calls", "service_tier", "metadata", "top_logprobs")
 	if text, ok := req["text"].(map[string]any); ok {
 		if format, ok := text["format"]; ok {
+			if err := validateResponsesTextFormatForOpenAI(format); err != nil {
+				return nil, err
+			}
 			out["response_format"] = format
 		}
 	}
@@ -138,6 +148,9 @@ func responsesToOpenAIRequest(body []byte) ([]byte, error) {
 					},
 				})
 			} else {
+				if isResponsesNativeToolType(toolType) {
+					return nil, fmt.Errorf("responses-native tool type %q cannot be converted to OpenAI Chat Completions", toolType)
+				}
 				return nil, fmt.Errorf("unsupported tool type %q in responses→openai conversion", toolType)
 			}
 		}
@@ -172,6 +185,28 @@ func convertResponsesContentToOpenAI(content any) (any, error) {
 				copyFields(part, p, "cache_control", "annotations", "citations")
 				parts = append(parts, part)
 			case "input_image":
+				hasURL := false
+				hasData := false
+				if raw, ok := p["image_url"]; ok {
+					s, ok := raw.(string)
+					if !ok || strings.TrimSpace(s) == "" {
+						return nil, fmt.Errorf("responses input_image content block cannot be converted to OpenAI/Anthropic image content with non-string or empty image_url")
+					}
+					hasURL = true
+				}
+				if raw, ok := p["image_data"]; ok {
+					s, ok := raw.(string)
+					if !ok || strings.TrimSpace(s) == "" {
+						return nil, fmt.Errorf("responses input_image content block cannot be converted to OpenAI/Anthropic image content with non-string or empty image_data")
+					}
+					hasData = true
+				}
+				if hasURL && hasData {
+					return nil, fmt.Errorf("responses input_image content block cannot be converted to OpenAI/Anthropic image content with both image_url and image_data set")
+				}
+				if !hasURL && !hasData {
+					return nil, fmt.Errorf("responses input_image content block cannot be converted to OpenAI/Anthropic image content without image_url or image_data")
+				}
 				imgURL, _ := p["image_url"].(string)
 				imgData, _ := p["image_data"].(string)
 				if imgURL != "" {
@@ -190,9 +225,13 @@ func convertResponsesContentToOpenAI(content any) (any, error) {
 			case "input_file":
 				file := map[string]any{}
 				copyFields(file, p, "file_url", "file_data", "file_id", "filename")
-				if len(file) > 0 {
-					parts = append(parts, map[string]any{"type": "file", "file": file})
+				if !hasNonEmptyStringField(p, "file_url") && !hasNonEmptyStringField(p, "file_data") && !hasNonEmptyStringField(p, "file_id") {
+					return nil, fmt.Errorf("responses input_file content block cannot be converted to OpenAI file content without file_url, file_data, or file_id")
 				}
+				if len(file) == 0 {
+					return nil, fmt.Errorf("responses input_file content block cannot be converted to OpenAI file content without file_url, file_data, file_id, or filename")
+				}
+				parts = append(parts, map[string]any{"type": "file", "file": file})
 			default:
 				return nil, fmt.Errorf("unsupported responses content type %q", typ)
 			}
@@ -255,6 +294,9 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, err
 	}
+	if err := rejectOpenAIUnsupportedRequestFields(req, "Responses"); err != nil {
+		return nil, err
+	}
 
 	out := make(map[string]any)
 
@@ -264,7 +306,7 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 	}
 
 	// Convert messages → input
-	var instructions string
+	var instructionParts []string
 	var input []any
 
 	if messages, ok := req["messages"].([]any); ok {
@@ -275,19 +317,23 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 			}
 			role, _ := msg["role"].(string)
 
-			// Extract system/developer as instructions
-			if (role == "system" || role == "developer") && instructions == "" {
-				if s, ok := msg["content"].(string); ok {
-					instructions = s
+			// Extract system/developer as ordered instructions
+			if role == "system" || role == "developer" {
+				if s := openAIInstructionText(msg["content"]); s != "" {
+					instructionParts = append(instructionParts, s)
 				}
 				continue
 			}
 
 			if role == "tool" {
+				outputText, outputErr := openAIToolMessageText(msg["content"])
+				if outputErr != nil {
+					return nil, outputErr
+				}
 				input = append(input, map[string]any{
 					"type":    "function_call_output",
 					"call_id": msg["tool_call_id"],
-					"output":  openAIContentText(msg["content"]),
+					"output":  outputText,
 				})
 				continue
 			}
@@ -327,8 +373,8 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 		}
 	}
 
-	if instructions != "" {
-		out["instructions"] = instructions
+	if len(instructionParts) > 0 {
+		out["instructions"] = strings.Join(instructionParts, "\n\n")
 	}
 	out["input"] = input
 
@@ -350,8 +396,11 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 	if v, ok := req["stop"]; ok {
 		out["stop"] = v
 	}
-	copyFields(out, req, "stream_options", "parallel_tool_calls", "service_tier", "metadata", "top_logprobs", "prompt_cache_key")
+	copyFields(out, req, "stream_options", "parallel_tool_calls", "service_tier", "metadata", "top_logprobs", "prompt_cache_key", "presence_penalty", "frequency_penalty", "seed", "logprobs")
 	if responseFormat, ok := req["response_format"]; ok {
+		if err := validateOpenAIResponseFormatForResponses(responseFormat); err != nil {
+			return nil, err
+		}
 		out["text"] = map[string]any{"format": responseFormat}
 	}
 	if user, ok := req["user"]; ok {
@@ -359,7 +408,28 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 	}
 
 	// Convert tools
-	if tools, ok := req["tools"].([]any); ok {
+	toolsValue := req["tools"]
+	if toolsValue == nil {
+		if functions, ok := req["functions"].([]any); ok {
+			var converted []any
+			for _, fn := range functions {
+				fnMap, ok := fn.(map[string]any)
+				if !ok {
+					continue
+				}
+				converted = append(converted, map[string]any{
+					"type": "function",
+					"function": map[string]any{
+						"name":        fnMap["name"],
+						"description": fnMap["description"],
+						"parameters":  fnMap["parameters"],
+					},
+				})
+			}
+			toolsValue = converted
+		}
+	}
+	if tools, ok := toolsValue.([]any); ok {
 		var respTools []any
 		for i, t := range tools {
 			tool, ok := t.(map[string]any)
@@ -380,6 +450,9 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 					"strict":      fn["strict"],
 				})
 			} else {
+				if isOpenAINonPortableToolType(toolType) {
+					return nil, fmt.Errorf("openai non-portable tool type %q cannot be converted to Responses", toolType)
+				}
 				return nil, fmt.Errorf("unsupported tool type %q in openai→responses conversion", toolType)
 			}
 		}
@@ -388,7 +461,30 @@ func openAIToResponsesRequest(body []byte) ([]byte, error) {
 		}
 	}
 
-	if v, ok := req["tool_choice"]; ok {
+	toolChoiceValue := req["tool_choice"]
+	if toolChoiceValue == nil {
+		if functionCall, ok := req["function_call"]; ok {
+			switch v := functionCall.(type) {
+			case string:
+				switch v {
+				case "none":
+					toolChoiceValue = "none"
+				case "auto":
+					toolChoiceValue = "auto"
+				default:
+					toolChoiceValue = "required"
+				}
+			case map[string]any:
+				if name, _ := v["name"].(string); name != "" {
+					toolChoiceValue = map[string]any{
+						"type":     "function",
+						"function": map[string]any{"name": name},
+					}
+				}
+			}
+		}
+	}
+	if v := toolChoiceValue; v != nil {
 		out["tool_choice"] = convertOpenAIToolChoiceToResponses(v)
 	}
 
@@ -415,29 +511,49 @@ func convertOpenAIContentToResponses(content any) (any, error) {
 				parts = append(parts, part)
 			case "image_url":
 				imgMap, _ := p["image_url"].(map[string]any)
-				if imgMap != nil {
-					url, _ := imgMap["url"].(string)
-					if strings.HasPrefix(url, "data:image/") {
-						if idx := strings.Index(url, ","); idx >= 0 {
-							part := map[string]any{"type": "input_image", "image_data": url[idx+1:]}
-							mediaInfo := strings.TrimPrefix(url[:idx], "data:")
-							part["media_type"] = strings.TrimSuffix(mediaInfo, ";base64")
-							copyFields(part, imgMap, "detail")
-							parts = append(parts, part)
-						}
-					} else {
-						part := map[string]any{"type": "input_image", "image_url": url}
-						copyFields(part, imgMap, "detail")
-						parts = append(parts, part)
-					}
+				if imgMap == nil {
+					return nil, fmt.Errorf("openai image_url content block cannot be converted to Responses input_image without an object image_url payload")
 				}
-			case "file":
-				if file, ok := p["file"].(map[string]any); ok {
-					part := map[string]any{"type": "input_file"}
-					copyFields(part, file, "file_url", "file_data", "file_id", "filename")
+				url, ok := imgMap["url"].(string)
+				if !ok || strings.TrimSpace(url) == "" {
+					return nil, fmt.Errorf("openai image_url content block cannot be converted to Responses input_image without a non-empty url")
+				}
+				if strings.HasPrefix(url, "data:image/") {
+					idx := strings.Index(url, ",")
+					if idx < 0 {
+						return nil, fmt.Errorf("openai image_url content block cannot be converted to Responses input_image from malformed data URL")
+					}
+					if idx+1 >= len(url) || strings.TrimSpace(url[idx+1:]) == "" {
+						return nil, fmt.Errorf("openai image_url content block cannot be converted to Responses input_image without non-empty base64 data")
+					}
+					part := map[string]any{"type": "input_image", "image_data": url[idx+1:]}
+					mediaInfo := strings.TrimPrefix(url[:idx], "data:")
+					part["media_type"] = strings.TrimSuffix(mediaInfo, ";base64")
+					copyFields(part, imgMap, "detail")
+					parts = append(parts, part)
+				} else {
+					part := map[string]any{"type": "input_image", "image_url": url}
+					copyFields(part, imgMap, "detail")
 					parts = append(parts, part)
 				}
+			case "file":
+				file, ok := p["file"].(map[string]any)
+				if !ok || file == nil {
+					return nil, fmt.Errorf("openai file content block cannot be converted to Responses input_file without an object file payload")
+				}
+				part := map[string]any{"type": "input_file"}
+				copyFields(part, file, "file_url", "file_data", "file_id", "filename")
+				if !hasNonEmptyStringField(file, "file_url") && !hasNonEmptyStringField(file, "file_data") && !hasNonEmptyStringField(file, "file_id") {
+					return nil, fmt.Errorf("openai file content block cannot be converted to Responses input_file without file_url, file_data, or file_id")
+				}
+				if len(part) == 1 {
+					return nil, fmt.Errorf("openai file content block cannot be converted to Responses input_file without file_url, file_data, file_id, or filename")
+				}
+				parts = append(parts, part)
 			default:
+				if isOpenAINonPortableContentType(typ) {
+					return nil, fmt.Errorf("unsupported openai non-portable content block %q for Responses/Anthropic conversion", typ)
+				}
 				return nil, fmt.Errorf("unsupported openai content type %q", typ)
 			}
 		}
@@ -461,6 +577,9 @@ func convertOpenAIContentToResponses(content any) (any, error) {
 func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	if err := rejectAnthropicUnsupportedRequestFields(req, "OpenAI Chat Completions"); err != nil {
 		return nil, err
 	}
 
@@ -505,10 +624,10 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 				if contentArr, ok := content.([]any); ok {
 					var textParts []any
 					var toolCalls []any
-					for _, block := range contentArr {
+					for blockIndex, block := range contentArr {
 						blockMap, ok := block.(map[string]any)
 						if !ok {
-							continue
+							return nil, fmt.Errorf("invalid anthropic assistant content block at index %d", blockIndex)
 						}
 						blockType, _ := blockMap["type"].(string)
 						switch blockType {
@@ -524,6 +643,11 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 									"arguments": string(inputJSON),
 								},
 							})
+						default:
+							if isAnthropicNonPortableContentType(blockType) {
+								return nil, fmt.Errorf("anthropic non-portable content block %q cannot be converted to OpenAI/Responses chat content", blockType)
+							}
+							return nil, fmt.Errorf("anthropic assistant content block type %q cannot be converted to OpenAI/Responses chat content", blockType)
 						}
 					}
 					if len(toolCalls) > 0 {
@@ -581,9 +705,13 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 							if flushErr != nil {
 								return nil, flushErr
 							}
+							toolText, toolErr := anthropicToolResultText(blockMap["content"])
+							if toolErr != nil {
+								return nil, toolErr
+							}
 							messages = append(messages, map[string]any{
 								"role":         "tool",
-								"content":      anthropicToolResultText(blockMap["content"]),
+								"content":      toolText,
 								"tool_call_id": blockMap["tool_use_id"],
 							})
 							continue
@@ -657,6 +785,9 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 					},
 				})
 			} else {
+				if isAnthropicBuiltInToolType(toolType) {
+					return nil, fmt.Errorf("anthropic built-in tool type %q cannot be converted to OpenAI Chat Completions", toolType)
+				}
 				return nil, fmt.Errorf("unsupported tool type %q in anthropic→openai conversion", toolType)
 			}
 		}
@@ -666,6 +797,9 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 	}
 	if tc, ok := req["tool_choice"].(map[string]any); ok {
 		tcType, _ := tc["type"].(string)
+		if disabled, ok := tc["disable_parallel_tool_use"].(bool); ok && disabled {
+			out["parallel_tool_calls"] = false
+		}
 		switch tcType {
 		case "auto":
 			out["tool_choice"] = "auto"
@@ -706,19 +840,65 @@ func anthropicContentToOpenAI(content any) (any, error) {
 				parts = append(parts, part)
 			case "image":
 				source, _ := b["source"].(map[string]any)
-				if source != nil {
-					srcType, _ := source["type"].(string)
-					if srcType == "url" {
-						parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": source["url"]}})
-					} else if srcType == "base64" {
-						mediaType, _ := source["media_type"].(string)
-						data, _ := source["data"].(string)
-						parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + mediaType + ";base64," + data}})
-					}
+				if source == nil {
+					return nil, fmt.Errorf("anthropic image block cannot be converted to OpenAI/Responses image content without an object source payload")
 				}
+				srcType, _ := source["type"].(string)
+				if srcType == "url" {
+					url, ok := source["url"].(string)
+					if !ok || strings.TrimSpace(url) == "" {
+						return nil, fmt.Errorf("anthropic image block cannot be converted to OpenAI/Responses image content without a non-empty source.url")
+					}
+					parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+				} else if srcType == "base64" {
+					mediaType, ok := source["media_type"].(string)
+					if !ok || strings.TrimSpace(mediaType) == "" {
+						return nil, fmt.Errorf("anthropic image block cannot be converted to OpenAI/Responses image content without a non-empty source.media_type")
+					}
+					data, ok := source["data"].(string)
+					if !ok || strings.TrimSpace(data) == "" {
+						return nil, fmt.Errorf("anthropic image block cannot be converted to OpenAI/Responses image content without non-empty source.data")
+					}
+					parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + mediaType + ";base64," + data}})
+				} else {
+					return nil, fmt.Errorf("anthropic image block cannot be converted to OpenAI/Responses image content from unsupported source type %q", srcType)
+				}
+			case "document":
+				if _, hasSource := b["source"]; !hasSource {
+					return nil, fmt.Errorf("anthropic document block cannot be converted to OpenAI/Responses file content without a supported source payload")
+				}
+				source, _ := b["source"].(map[string]any)
+				if source == nil {
+					return nil, fmt.Errorf("anthropic document block cannot be converted to OpenAI/Responses file content without an object source payload")
+				}
+				srcType, _ := source["type"].(string)
+				file := map[string]any{}
+				switch srcType {
+				case "url":
+					if url, _ := source["url"].(string); url != "" {
+						file["file_url"] = url
+					} else {
+						return nil, fmt.Errorf("anthropic document block cannot be converted to OpenAI/Responses file content without a non-empty url source")
+					}
+				case "base64":
+					if data, _ := source["data"].(string); data != "" {
+						file["file_data"] = data
+					} else {
+						return nil, fmt.Errorf("anthropic document block cannot be converted to OpenAI/Responses file content without non-empty base64 data")
+					}
+				default:
+					return nil, fmt.Errorf("anthropic document block cannot be converted to OpenAI/Responses file content from unsupported source type %q", srcType)
+				}
+				if title := inferAnthropicDocumentFilename(b, source); title != "" {
+					file["filename"] = title
+				}
+				parts = append(parts, map[string]any{"type": "file", "file": file})
 			case "tool_result":
 				// Handled by the caller; should not appear here but skip gracefully.
 			default:
+				if isAnthropicNonPortableContentType(typ) {
+					return nil, fmt.Errorf("anthropic non-portable content block %q cannot be converted to OpenAI/Responses chat content", typ)
+				}
 				return nil, fmt.Errorf("unsupported anthropic content type %q", typ)
 			}
 		}
@@ -744,6 +924,12 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, err
 	}
+	if err := rejectOpenAIUnsupportedRequestFields(req, "Anthropic Messages"); err != nil {
+		return nil, err
+	}
+	if err := rejectOpenAIToAnthropicUnsupportedRequestFields(req); err != nil {
+		return nil, err
+	}
 
 	out := make(map[string]any)
 
@@ -762,7 +948,7 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 	}
 
 	// Extract system messages
-	var systemContent any
+	var systemParts []string
 	var messages []any
 
 	if msgs, ok := req["messages"].([]any); ok {
@@ -774,12 +960,8 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 			role, _ := msg["role"].(string)
 
 			if role == "system" || role == "developer" {
-				if systemContent == nil {
-					converted, convErr := openAIContentToAnthropic(msg["content"])
-					if convErr != nil {
-						return nil, convErr
-					}
-					systemContent = converted
+				if s := openAIInstructionText(msg["content"]); s != "" {
+					systemParts = append(systemParts, s)
 				}
 				continue
 			}
@@ -859,8 +1041,8 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 		}
 	}
 
-	if systemContent != nil {
-		out["system"] = systemContent
+	if len(systemParts) > 0 {
+		out["system"] = strings.Join(systemParts, "\n\n")
 	}
 	out["messages"] = messages
 
@@ -883,7 +1065,28 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 	}
 
 	// Convert tools
-	if tools, ok := req["tools"].([]any); ok {
+	toolsValue := req["tools"]
+	if toolsValue == nil {
+		if functions, ok := req["functions"].([]any); ok {
+			var converted []any
+			for _, fn := range functions {
+				fnMap, ok := fn.(map[string]any)
+				if !ok {
+					continue
+				}
+				converted = append(converted, map[string]any{
+					"type": "function",
+					"function": map[string]any{
+						"name":        fnMap["name"],
+						"description": fnMap["description"],
+						"parameters":  fnMap["parameters"],
+					},
+				})
+			}
+			toolsValue = converted
+		}
+	}
+	if tools, ok := toolsValue.([]any); ok {
 		var anthropicTools []any
 		for i, t := range tools {
 			tool, ok := t.(map[string]any)
@@ -903,6 +1106,9 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 					"strict":       fn["strict"],
 				})
 			} else {
+				if isOpenAINonPortableToolType(toolType) {
+					return nil, fmt.Errorf("openai non-portable tool type %q cannot be converted to Anthropic Messages", toolType)
+				}
 				return nil, fmt.Errorf("unsupported tool type %q in openai→anthropic conversion", toolType)
 			}
 		}
@@ -912,7 +1118,30 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 	}
 
 	// Convert tool_choice
-	if tc, ok := req["tool_choice"]; ok {
+	toolChoiceValue := req["tool_choice"]
+	if toolChoiceValue == nil {
+		if functionCall, ok := req["function_call"]; ok {
+			switch v := functionCall.(type) {
+			case string:
+				switch v {
+				case "none":
+					toolChoiceValue = "none"
+				case "auto":
+					toolChoiceValue = "auto"
+				default:
+					toolChoiceValue = "required"
+				}
+			case map[string]any:
+				if name, _ := v["name"].(string); name != "" {
+					toolChoiceValue = map[string]any{
+						"type":     "function",
+						"function": map[string]any{"name": name},
+					}
+				}
+			}
+		}
+	}
+	if tc := toolChoiceValue; tc != nil {
 		switch v := tc.(type) {
 		case string:
 			switch v {
@@ -962,33 +1191,68 @@ func openAIContentToAnthropic(content any) (any, error) {
 				blocks = append(blocks, block)
 			case "image_url":
 				imgMap, _ := p["image_url"].(map[string]any)
-				if imgMap != nil {
-					url, _ := imgMap["url"].(string)
-					if strings.HasPrefix(url, "data:image/") {
-						parts := strings.SplitN(url, ",", 2)
-						if len(parts) == 2 {
-							mediaInfo := strings.TrimPrefix(parts[0], "data:")
-							mediaInfo = strings.TrimSuffix(mediaInfo, ";base64")
-							blocks = append(blocks, map[string]any{
-								"type": "image",
-								"source": map[string]any{
-									"type":       "base64",
-									"media_type": mediaInfo,
-									"data":       parts[1],
-								},
-							})
-						}
-					} else {
-						blocks = append(blocks, map[string]any{
-							"type": "image",
-							"source": map[string]any{
-								"type": "url",
-								"url":  url,
-							},
-						})
-					}
+				if imgMap == nil {
+					return nil, fmt.Errorf("openai image_url block cannot be converted to Anthropic image content without an object image_url payload")
 				}
+				url, ok := imgMap["url"].(string)
+				if !ok || strings.TrimSpace(url) == "" {
+					return nil, fmt.Errorf("openai image_url block cannot be converted to Anthropic image content without a non-empty url")
+				}
+				if strings.HasPrefix(url, "data:image/") {
+					parts := strings.SplitN(url, ",", 2)
+					if len(parts) != 2 {
+						return nil, fmt.Errorf("openai image_url block cannot be converted to Anthropic image content from malformed data URL")
+					}
+					if strings.TrimSpace(parts[1]) == "" {
+						return nil, fmt.Errorf("openai image_url block cannot be converted to Anthropic image content without non-empty base64 data")
+					}
+					mediaInfo := strings.TrimPrefix(parts[0], "data:")
+					mediaInfo = strings.TrimSuffix(mediaInfo, ";base64")
+					blocks = append(blocks, map[string]any{
+						"type": "image",
+						"source": map[string]any{
+							"type":       "base64",
+							"media_type": mediaInfo,
+							"data":       parts[1],
+						},
+					})
+				} else {
+					blocks = append(blocks, map[string]any{
+						"type": "image",
+						"source": map[string]any{
+							"type": "url",
+							"url":  url,
+						},
+					})
+				}
+			case "file":
+				fileMap, ok := p["file"].(map[string]any)
+				if !ok || fileMap == nil {
+					return nil, fmt.Errorf("openai file block cannot be converted to Anthropic document content without an object file payload")
+				}
+				doc := map[string]any{"type": "document"}
+				source := map[string]any{}
+				if fileURL, _ := fileMap["file_url"].(string); fileURL != "" {
+					source["type"] = "url"
+					source["url"] = fileURL
+				} else if fileData, _ := fileMap["file_data"].(string); fileData != "" {
+					source["type"] = "base64"
+					source["media_type"] = inferMediaTypeFromFilename(fileMap["filename"])
+					source["data"] = fileData
+				} else if fileID, _ := fileMap["file_id"].(string); fileID != "" {
+					return nil, fmt.Errorf("openai file block with file_id %q cannot be converted to Anthropic document content", fileID)
+				} else {
+					return nil, fmt.Errorf("openai file block cannot be converted to Anthropic document content without file_url or file_data")
+				}
+				doc["source"] = source
+				if title := inferOpenAIFileTitle(fileMap); title != "" {
+					doc["title"] = title
+				}
+				blocks = append(blocks, doc)
 			default:
+				if isOpenAINonPortableContentType(typ) {
+					return nil, fmt.Errorf("unsupported openai non-portable content block %q for Responses/Anthropic conversion", typ)
+				}
 				return nil, fmt.Errorf("unsupported openai→anthropic content type %q", typ)
 			}
 		}
@@ -1026,6 +1290,110 @@ func anthropicToResponsesRequest(body []byte) ([]byte, error) {
 	return openAIToResponsesRequest(openaiBody)
 }
 
+func rejectResponsesStatefulRequestFields(req map[string]any, target string) error {
+	if hasNonEmptyStringField(req, "previous_response_id") {
+		return fmt.Errorf("responses stateful field previous_response_id cannot be converted to %s", target)
+	}
+	if hasNonEmptyStringField(req, "conversation") {
+		return fmt.Errorf("responses stateful field conversation cannot be converted to %s", target)
+	}
+	if _, ok := req["conversation"].(map[string]any); ok {
+		return fmt.Errorf("responses stateful field conversation cannot be converted to %s", target)
+	}
+	if _, ok := req["context_management"]; ok && req["context_management"] != nil {
+		return fmt.Errorf("responses stateful field context_management cannot be converted to %s", target)
+	}
+	if _, ok := req["prompt"]; ok && req["prompt"] != nil {
+		return fmt.Errorf("responses stateful field prompt cannot be converted to %s", target)
+	}
+	if include, ok := req["include"].([]any); ok && len(include) > 0 {
+		return fmt.Errorf("responses stateful field include cannot be converted to %s", target)
+	}
+	if _, ok := req["reasoning"]; ok && req["reasoning"] != nil {
+		return fmt.Errorf("responses stateful field reasoning cannot be converted to %s", target)
+	}
+	if text, ok := req["text"].(map[string]any); ok {
+		if _, ok := text["verbosity"]; ok && text["verbosity"] != nil {
+			return fmt.Errorf("responses field text.verbosity cannot be converted to %s", target)
+		}
+	}
+	if _, ok := req["truncation"]; ok && req["truncation"] != nil {
+		return fmt.Errorf("responses stateful field truncation cannot be converted to %s", target)
+	}
+	if _, ok := req["max_tool_calls"]; ok && req["max_tool_calls"] != nil {
+		return fmt.Errorf("responses stateful field max_tool_calls cannot be converted to %s", target)
+	}
+	if store, ok := req["store"].(bool); ok && store {
+		return fmt.Errorf("responses stateful field store cannot be converted to %s", target)
+	}
+	if background, ok := req["background"].(bool); ok && background {
+		return fmt.Errorf("responses stateful field background cannot be converted to %s", target)
+	}
+	return nil
+}
+
+func rejectAnthropicUnsupportedRequestFields(req map[string]any, target string) error {
+	for _, field := range []string{"thinking", "output_config", "container", "inference_geo", "top_k", "cache_control", "mcp_servers", "user_profile_id", "speed"} {
+		if _, ok := req[field]; ok && req[field] != nil {
+			return fmt.Errorf("anthropic field %s cannot be converted to %s", field, target)
+		}
+	}
+	return nil
+}
+
+func rejectOpenAIUnsupportedRequestFields(req map[string]any, target string) error {
+	if n, ok := req["n"]; ok && toInt(n) > 1 {
+		return fmt.Errorf("openai field n cannot be converted to %s when greater than 1", target)
+	}
+	if _, ok := req["logit_bias"]; ok && req["logit_bias"] != nil {
+		return fmt.Errorf("openai field logit_bias cannot be converted to %s", target)
+	}
+	if _, ok := req["prediction"]; ok && req["prediction"] != nil {
+		return fmt.Errorf("openai field prediction cannot be converted to %s", target)
+	}
+	if _, ok := req["audio"]; ok && req["audio"] != nil {
+		return fmt.Errorf("openai field audio cannot be converted to %s", target)
+	}
+	return nil
+}
+
+func rejectOpenAIToAnthropicUnsupportedRequestFields(req map[string]any) error {
+	for _, field := range []string{"response_format", "stream_options", "top_logprobs", "presence_penalty", "frequency_penalty", "seed", "logprobs"} {
+		if _, ok := req[field]; ok && req[field] != nil {
+			return fmt.Errorf("openai field %s cannot be converted to Anthropic Messages", field)
+		}
+	}
+	return nil
+}
+
+func validateOpenAIResponseFormatForResponses(responseFormat any) error {
+	format, ok := responseFormat.(map[string]any)
+	if !ok || format == nil {
+		return fmt.Errorf("openai field response_format cannot be converted to Responses without an object payload")
+	}
+	typeValue, _ := format["type"].(string)
+	switch typeValue {
+	case "text", "json_object", "json_schema":
+		return nil
+	default:
+		return fmt.Errorf("openai field response_format cannot be converted to Responses for unsupported format type %q", typeValue)
+	}
+}
+
+func validateResponsesTextFormatForOpenAI(textFormat any) error {
+	format, ok := textFormat.(map[string]any)
+	if !ok || format == nil {
+		return fmt.Errorf("responses field text.format cannot be converted to OpenAI Chat Completions without an object payload")
+	}
+	typeValue, _ := format["type"].(string)
+	switch typeValue {
+	case "text", "json_object", "json_schema":
+		return nil
+	default:
+		return fmt.Errorf("responses field text.format cannot be converted to OpenAI Chat Completions for unsupported format type %q", typeValue)
+	}
+}
+
 func openAIContentText(content any) string {
 	switch v := content.(type) {
 	case nil:
@@ -1049,12 +1417,128 @@ func openAIContentText(content any) string {
 	}
 }
 
-func anthropicToolResultText(content any) string {
+func openAIInstructionText(content any) string {
 	switch v := content.(type) {
-	case nil:
-		return ""
 	case string:
 		return v
+	case []any:
+		return openAIContentText(v)
+	default:
+		return ""
+	}
+}
+
+func inferMediaTypeFromFilename(filename any) string {
+	name, _ := filename.(string)
+	if name == "" {
+		return "application/octet-stream"
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext == "" {
+		return "application/octet-stream"
+	}
+	if mediaType := mime.TypeByExtension(ext); mediaType != "" {
+		return mediaType
+	}
+	return "application/octet-stream"
+}
+
+func inferAnthropicDocumentFilename(block map[string]any, source map[string]any) string {
+	if title, _ := block["title"].(string); title != "" {
+		return title
+	}
+	sourceURL, _ := source["url"].(string)
+	if sourceURL != "" {
+		parsed, err := url.Parse(sourceURL)
+		if err == nil {
+			base := path.Base(parsed.Path)
+			if base != "." && base != "/" && base != "" {
+				return base
+			}
+		}
+	}
+	mediaType, _ := source["media_type"].(string)
+	if mediaType == "" {
+		return ""
+	}
+	if exts, err := mime.ExtensionsByType(mediaType); err == nil && len(exts) > 0 {
+		ext := exts[0]
+		if ext != "" {
+			return "document" + ext
+		}
+	}
+	return ""
+}
+
+func hasNonEmptyStringField(m map[string]any, key string) bool {
+	v, ok := m[key]
+	if !ok {
+		return false
+	}
+	s, ok := v.(string)
+	return ok && s != ""
+}
+
+func inferOpenAIFileTitle(fileMap map[string]any) string {
+	if filename, _ := fileMap["filename"].(string); filename != "" {
+		return filename
+	}
+	fileURL, _ := fileMap["file_url"].(string)
+	if fileURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(fileURL)
+	if err != nil {
+		return ""
+	}
+	base := path.Base(parsed.Path)
+	if base == "." || base == "/" || base == "" {
+		return ""
+	}
+	return base
+}
+
+func isResponsesNativeToolType(toolType string) bool {
+	switch toolType {
+	case "web_search", "file_search", "code_interpreter", "computer_use", "image_generation", "mcp", "local_shell", "tool_search":
+		return true
+	default:
+		return false
+	}
+}
+
+func isOpenAINonPortableToolType(toolType string) bool {
+	return toolType != "" && toolType != "function"
+}
+
+func isOpenAINonPortableContentType(contentType string) bool {
+	switch contentType {
+	case "input_audio", "audio", "video", "video_file":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAnthropicBuiltInToolType(toolType string) bool {
+	return toolType != "" && toolType != "custom"
+}
+
+func isAnthropicNonPortableContentType(contentType string) bool {
+	switch contentType {
+	case "search_result", "thinking", "redacted_thinking", "server_tool_use", "server_tool_result":
+		return true
+	default:
+		return false
+	}
+}
+
+func anthropicToolResultText(content any) (string, error) {
+	switch v := content.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return v, nil
 	case []any:
 		var sb strings.Builder
 		for _, item := range v {
@@ -1062,13 +1546,44 @@ func anthropicToolResultText(content any) string {
 			if !ok {
 				continue
 			}
+			blockType, _ := block["type"].(string)
+			if blockType != "text" {
+				return "", fmt.Errorf("anthropic tool_result content block %q cannot be converted to OpenAI/Responses tool output", blockType)
+			}
 			if text, ok := block["text"].(string); ok {
 				sb.WriteString(text)
 			}
 		}
-		return sb.String()
+		return sb.String(), nil
 	default:
-		return fmt.Sprint(v)
+		return fmt.Sprint(v), nil
+	}
+}
+
+func openAIToolMessageText(content any) (string, error) {
+	switch v := content.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return v, nil
+	case []any:
+		var sb strings.Builder
+		for _, item := range v {
+			part, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			partType, _ := part["type"].(string)
+			if partType != "text" {
+				return "", fmt.Errorf("openai tool message content part %q cannot be converted to Responses tool output", partType)
+			}
+			if text, ok := part["text"].(string); ok {
+				sb.WriteString(text)
+			}
+		}
+		return sb.String(), nil
+	default:
+		return fmt.Sprint(v), nil
 	}
 }
 

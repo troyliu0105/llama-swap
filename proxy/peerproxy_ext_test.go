@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -476,4 +477,90 @@ func TestEnhancedPeerProxy_ProtocolConversionFlushesConcurrencyPath(t *testing.T
 	assert.Contains(t, w.Body.String(), "converted")
 	assert.Equal(t, int64(len(w.Body.Bytes())), w.Result().ContentLength)
 	assert.NotEqual(t, int64(len(upstreamBody)), w.Result().ContentLength)
+}
+
+func TestEnhancedPeerProxy_CountTokensBypassesProtocolConversion(t *testing.T) {
+	var receivedPath string
+	var receivedBody string
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":12}`))
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryExtConfig{
+		"peer1": config.ExtendedPeerConfig{
+			Proxy:          testServer.URL,
+			ProxyURL:       proxyURL,
+			Models:         []string{"test-model"},
+			MaxConcurrent:  1,
+			QueueSize:      1,
+			QueueTimeout:   time.Second,
+			UpstreamFormat: "responses",
+		},
+	}
+
+	pm, err := NewEnhancedPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	body := `{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/messages/count_tokens", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/messages/count_tokens", receivedPath)
+	assert.JSONEq(t, body, receivedBody)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"input_tokens":12}`, w.Body.String())
+}
+
+func TestEnhancedPeerProxy_OpenAIFileConvertsToAnthropicDocument(t *testing.T) {
+	var receivedPath string
+	var receivedBody string
+	upstreamBody := []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"converted"}],"model":"claude-3","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":3}}`)
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	peers := config.PeerDictionaryExtConfig{
+		"peer1": config.ExtendedPeerConfig{
+			Proxy:          testServer.URL,
+			ProxyURL:       proxyURL,
+			Models:         []string{"test-model"},
+			MaxConcurrent:  1,
+			QueueSize:      1,
+			QueueTimeout:   time.Second,
+			UpstreamFormat: "anthropic",
+		},
+	}
+
+	pm, err := NewEnhancedPeerProxy(peers, false, testLogger)
+	require.NoError(t, err)
+
+	body := `{"model":"test-model","messages":[{"role":"user","content":[{"type":"file","file":{"file_url":"https://example.com/files/report.pdf"}},{"type":"text","text":"summarize this"}]}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	err = pm.ProxyRequest("test-model", w, req)
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/messages", receivedPath)
+	assert.Contains(t, receivedBody, `"type":"document"`)
+	assert.Contains(t, receivedBody, `"url":"https://example.com/files/report.pdf"`)
+	assert.Contains(t, receivedBody, `"title":"report.pdf"`)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "chat.completion")
+	assert.Contains(t, w.Body.String(), "converted")
 }

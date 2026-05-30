@@ -333,68 +333,44 @@ func (pp *peerProxyMember) processQueue() {
 	for {
 		select {
 		case req := <-pp.queue:
-			go func(qr *queuedRequest) {
-				// recover from http.ErrAbortHandler panics that can occur when the client
-				// disconnects before the response is sent
-				defer func() {
-					if r := recover(); r != nil {
-						if r == http.ErrAbortHandler {
-							pp.logger.Warnf("peer %s: recovered from client disconnection during streaming", pp.peerID)
-						} else {
-							pp.logger.Warnf("peer %s: recovered from panic: %v", pp.peerID, r)
-						}
-					}
-				}()
-				defer atomic.AddInt32(&pp.waitingCount, -1)
+			if req.cancelled.Load() {
+				atomic.AddInt32(&pp.waitingCount, -1)
+				close(req.done)
+				continue
+			}
 
-				if qr.cancelled.Load() {
-					close(qr.done)
-					return
+			// Wait for request interval BEFORE acquiring semaphore, but do it in queue order.
+			if err := pp.waitForRequestInterval(req.request.Context(), req.request.URL.Path); err != nil {
+				fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
+					pp.peerID, req.request.URL.Path, err)
+				atomic.AddInt32(&pp.waitingCount, -1)
+				if req.responded.CompareAndSwap(false, true) {
+					http.Error(req.writer, err.Error(), http.StatusServiceUnavailable)
 				}
+				close(req.done)
+				continue
+			}
 
-				// Wait for request interval BEFORE acquiring semaphore
-				if err := pp.waitForRequestInterval(qr.request.Context(), qr.request.URL.Path); err != nil {
-					fmt.Printf("[PEER ERROR] peer=%s rate_limit_cancelled path=%s error=%s\n",
-						pp.peerID, qr.request.URL.Path, err)
-					if qr.responded.CompareAndSwap(false, true) {
-						http.Error(qr.writer, err.Error(), http.StatusServiceUnavailable)
-					}
-					close(qr.done)
-					return
+			select {
+			case pp.sem <- struct{}{}:
+				atomic.AddInt32(&pp.waitingCount, -1)
+				fmt.Printf("[PEER] peer=%s dequeued active=%d/%d queue=%d path=%s\n",
+					pp.peerID, len(pp.sem), pp.maxConcurrent, int(atomic.LoadInt32(&pp.waitingCount)), req.request.URL.Path)
+				go pp.serveQueuedRequest(req)
+			case <-time.After(pp.queueTimeout):
+				fmt.Printf("[PEER ERROR] peer=%s queue_timeout waiting=%ds path=%s\n",
+					pp.peerID, int(pp.queueTimeout.Seconds()), req.request.URL.Path)
+				atomic.AddInt32(&pp.waitingCount, -1)
+				if req.responded.CompareAndSwap(false, true) {
+					http.Error(req.writer, "request timed out waiting in queue", http.StatusServiceUnavailable)
 				}
-
-				select {
-				case pp.sem <- struct{}{}:
-					defer func() { <-pp.sem }()
-					ctx := qr.request.Context()
-					select {
-					case <-ctx.Done():
-						fmt.Printf("[PEER] peer=%s cancelled_while_waiting path=%s\n",
-							pp.peerID, qr.request.URL.Path)
-					default:
-						fmt.Printf("[PEER] peer=%s dequeued active=%d/%d queue=%d path=%s\n",
-							pp.peerID, len(pp.sem), pp.maxConcurrent, int(atomic.LoadInt32(&pp.waitingCount)), qr.request.URL.Path)
-						if qr.cancelled.Load() {
-							fmt.Printf("[PEER] peer=%s cancelled_before_serve path=%s\n",
-								pp.peerID, qr.request.URL.Path)
-						} else {
-							qr.responded.Store(true)
-							pp.reverseProxy.ServeHTTP(qr.writer, qr.request)
-							pp.markRequestComplete()
-						}
-					}
-				case <-time.After(pp.queueTimeout):
-					fmt.Printf("[PEER ERROR] peer=%s queue_timeout waiting=%ds path=%s\n",
-						pp.peerID, int(pp.queueTimeout.Seconds()), qr.request.URL.Path)
-					if qr.responded.CompareAndSwap(false, true) {
-						http.Error(qr.writer, "request timed out waiting in queue", http.StatusServiceUnavailable)
-					}
-				case <-qr.request.Context().Done():
-					fmt.Printf("[PEER] peer=%s cancelled_in_queue path=%s\n",
-						pp.peerID, qr.request.URL.Path)
-				}
-				close(qr.done)
-			}(req)
+				close(req.done)
+			case <-req.request.Context().Done():
+				fmt.Printf("[PEER] peer=%s cancelled_in_queue path=%s\n",
+					pp.peerID, req.request.URL.Path)
+				atomic.AddInt32(&pp.waitingCount, -1)
+				close(req.done)
+			}
 		case <-pp.stopCh:
 			for len(pp.queue) > 0 {
 				req := <-pp.queue
@@ -407,6 +383,41 @@ func (pp *peerProxyMember) processQueue() {
 			return
 		}
 	}
+}
+
+func (pp *peerProxyMember) serveQueuedRequest(qr *queuedRequest) {
+	// recover from http.ErrAbortHandler panics that can occur when the client
+	// disconnects before the response is sent
+	defer func() {
+		if r := recover(); r != nil {
+			if r == http.ErrAbortHandler {
+				pp.logger.Warnf("peer %s: recovered from client disconnection during streaming", pp.peerID)
+			} else {
+				pp.logger.Warnf("peer %s: recovered from panic: %v", pp.peerID, r)
+			}
+		}
+	}()
+	defer func() { <-pp.sem }()
+	defer close(qr.done)
+
+	ctx := qr.request.Context()
+	select {
+	case <-ctx.Done():
+		fmt.Printf("[PEER] peer=%s cancelled_while_waiting path=%s\n",
+			pp.peerID, qr.request.URL.Path)
+		return
+	default:
+	}
+
+	if qr.cancelled.Load() {
+		fmt.Printf("[PEER] peer=%s cancelled_before_serve path=%s\n",
+			pp.peerID, qr.request.URL.Path)
+		return
+	}
+
+	qr.responded.Store(true)
+	pp.reverseProxy.ServeHTTP(qr.writer, qr.request)
+	pp.markRequestComplete()
 }
 
 func (pp *peerProxyMember) serveWithConcurrencyControl(writer http.ResponseWriter, request *http.Request) serveResult {

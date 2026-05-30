@@ -31,10 +31,15 @@ When a peer model is configured with `upstreamFormat`, llama-swap can convert Ch
 ### Supported Well
 
 - Standard text chat requests and responses
+- Deprecated Chat `functions` / `function_call` request compatibility
+- Ordered aggregation of multiple `system` / `developer` instruction messages on supported request paths
 - Function tools / tool calls
+- Portable file/document request conversion on the supported request paths
 - Streamed text deltas
+- Streamed refusal deltas on the supported Responses → Chat bridge
 - Streamed reasoning/thinking deltas on the supported paths
 - Usage conversion for the supported response shapes
+- Non-streaming refusal preservation on the supported response paths
 - `content_filter`, `length`, and tool-call terminal state mapping on the converted paths
 
 ### Known Gaps

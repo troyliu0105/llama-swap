@@ -31,8 +31,12 @@ When a peer model is configured with `upstreamFormat`, llama-swap can convert An
 ### Supported Well
 
 - Standard `system` + `messages` conversational flows
+- Deprecated Chat `functions` / `function_call` compatibility when bridging from Chat requests
+- Ordered aggregation of multiple Chat `system` / `developer` instruction messages when bridging from Chat requests
 - Custom tool definitions with `name` and `input_schema`
+- Portable file/document request conversion on the supported request paths
 - Tool-use / tool-result round trips on the common paths
+- Non-streaming refusal preservation on the supported response paths
 - Streamed text, thinking, and tool-call argument deltas on supported paths
 - Common stop-reason and usage conversions
 
@@ -40,7 +44,7 @@ When a peer model is configured with `upstreamFormat`, llama-swap can convert An
 
 - Anthropic-provided built-in tool families are not converted into Chat Completions or Responses equivalents.
 - Some Anthropic content block types and extension fields do not have exact equivalents in the OpenAI protocols.
-- Multimodal coverage is incomplete across conversions; unsupported block families may fail conversion instead of degrading.
+- Multimodal coverage is incomplete across conversions; unsupported or malformed document/content families are rejected explicitly instead of being dropped silently.
 - `/v1/messages/count_tokens` is intentionally not treated as normal Messages conversion traffic.
 
 ## Authentication

@@ -250,6 +250,36 @@ func TestOpenAIToAnthropicRequest(t *testing.T) {
 	}
 }
 
+func TestOpenAIToResponsesRequest_MultipleInstructionMessagesCombined(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"system","content":"First instruction"},{"role":"developer","content":"Second instruction"},{"role":"user","content":"Hello"}]}`
+	body, err := openAIToResponsesRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+	if req["instructions"] != "First instruction\n\nSecond instruction" {
+		t.Fatalf("instructions = %v, want combined ordered instructions", req["instructions"])
+	}
+}
+
+func TestOpenAIToAnthropicRequest_MultipleInstructionMessagesCombined(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"system","content":"First instruction"},{"role":"developer","content":"Second instruction"},{"role":"user","content":"Hello"}],"max_completion_tokens":100}`
+	body, err := openAIToAnthropicRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+	if req["system"] != "First instruction\n\nSecond instruction" {
+		t.Fatalf("system = %v, want combined ordered instructions", req["system"])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Response conversion tests
 // ---------------------------------------------------------------------------
@@ -280,6 +310,86 @@ func TestConvertOpenAIResponseToResponses(t *testing.T) {
 	output, ok := resp["output"].([]any)
 	if !ok || len(output) == 0 {
 		t.Fatalf("output should be a non-empty array")
+	}
+}
+
+func TestConvertOpenAIResponseToResponses_PreservesRefusal(t *testing.T) {
+	input := `{"id":"chatcmpl-123","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"","refusal":"I can't help with that."},"finish_reason":"stop"}]}`
+	body, err := convertOpenAIResponseToResponses([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	output := resp["output"].([]any)
+	message := output[0].(map[string]any)
+	content := message["content"].([]any)
+	refusal := content[0].(map[string]any)
+	if refusal["type"] != "refusal" || refusal["refusal"] != "I can't help with that." {
+		t.Fatalf("refusal content = %v, want refusal block", refusal)
+	}
+}
+
+func TestConvertOpenAIResponseToResponses_IncompleteMappings(t *testing.T) {
+	tests := []struct {
+		name       string
+		finish     string
+		wantStatus string
+		wantReason string
+	}{
+		{name: "length", finish: "length", wantStatus: "incomplete", wantReason: "max_output_tokens"},
+		{name: "content_filter", finish: "content_filter", wantStatus: "incomplete", wantReason: "content_filter"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := fmt.Sprintf(`{"id":"chatcmpl-123","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"partial"},"finish_reason":%q}]}`, tt.finish)
+			body, err := convertOpenAIResponseToResponses([]byte(input))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var resp map[string]any
+			if err := json.Unmarshal(body, &resp); err != nil {
+				t.Fatalf("failed to unmarshal: %v", err)
+			}
+			if resp["status"] != tt.wantStatus {
+				t.Fatalf("status = %v, want %s", resp["status"], tt.wantStatus)
+			}
+			details := resp["incomplete_details"].(map[string]any)
+			if details["reason"] != tt.wantReason {
+				t.Fatalf("incomplete_details = %v, want reason %s", details, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponseToResponses_MultiChoiceFailsExplicitly(t *testing.T) {
+	input := `{"id":"chatcmpl-123","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"first"},"finish_reason":"stop"},{"index":1,"message":{"role":"assistant","content":"second"},"finish_reason":"stop"}]}`
+	_, err := convertOpenAIResponseToResponses([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for multi-choice chat response, got nil")
+	}
+	if !containsSubstring(err.Error(), "choices") {
+		t.Fatalf("error = %q, want mention of choices", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertOpenAIResponseToResponses_LogprobsFailExplicitly(t *testing.T) {
+	input := `{"id":"chatcmpl-123","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"Hello!"},"finish_reason":"stop","logprobs":{"content":[{"token":"Hello"}]}}]}`
+	_, err := convertOpenAIResponseToResponses([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for chat response logprobs, got nil")
+	}
+	if !containsSubstring(err.Error(), "logprobs") {
+		t.Fatalf("error = %q, want mention of logprobs", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
 	}
 }
 
@@ -341,6 +451,96 @@ func TestConvertResponsesResponseToOpenAI(t *testing.T) {
 	msg := choice["message"].(map[string]any)
 	if msg["content"] != "Hi there!" {
 		t.Errorf("content = %v, want 'Hi there!'", msg["content"])
+	}
+}
+
+func TestConvertResponsesResponseToOpenAI_PreservesRefusal(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I can't help with that."}]}]}`
+	body, err := convertResponsesResponseToOpenAI([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	choice := resp["choices"].([]any)[0].(map[string]any)
+	msg := choice["message"].(map[string]any)
+	if msg["refusal"] != "I can't help with that." {
+		t.Fatalf("refusal = %v, want refusal preserved", msg["refusal"])
+	}
+	if msg["content"] != "" {
+		t.Fatalf("content = %v, want empty string for refusal-only message", msg["content"])
+	}
+}
+
+func TestConvertResponsesResponseToOpenAI_UnsupportedOutputItemFailsExplicitly(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"reasoning","id":"rs_1","summary":[]}]}`
+	_, err := convertResponsesResponseToOpenAI([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for unsupported Responses output item, got nil")
+	}
+	if !containsSubstring(err.Error(), "output item") {
+		t.Fatalf("error = %q, want mention of output item", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertResponsesResponseToOpenAI_RepeatedMessageItemsFailExplicitly(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second"}]}]}`
+	_, err := convertResponsesResponseToOpenAI([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for repeated Responses message items, got nil")
+	}
+	if !containsSubstring(err.Error(), "multiple message output items") {
+		t.Fatalf("error = %q, want mention of multiple message output items", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertResponsesResponseToOpenAI_UnsupportedMessageContentPartFailsExplicitly(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"reasoning_text","text":"internal"}]}]}`
+	_, err := convertResponsesResponseToOpenAI([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for unsupported Responses message content part, got nil")
+	}
+	if !containsSubstring(err.Error(), "message content part") {
+		t.Fatalf("error = %q, want mention of message content part", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertResponsesResponseToOpenAI_OutputTextAnnotationsFailExplicitly(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello","annotations":[{"type":"url_citation","url":"https://example.com"}]}]}]}`
+	_, err := convertResponsesResponseToOpenAI([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for output_text annotations, got nil")
+	}
+	if !containsSubstring(err.Error(), "annotations") {
+		t.Fatalf("error = %q, want mention of annotations", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertResponsesResponseToOpenAI_OutputTextLogprobsFailExplicitly(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello","logprobs":[{"token":"hello"}]}]}]}`
+	_, err := convertResponsesResponseToOpenAI([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for output_text logprobs, got nil")
+	}
+	if !containsSubstring(err.Error(), "logprobs") {
+		t.Fatalf("error = %q, want mention of logprobs", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
 	}
 }
 
@@ -629,6 +829,54 @@ func TestOpenAIToAnthropicTools_EmitsCompatibleSchema(t *testing.T) {
 	}
 }
 
+func TestOpenAIToResponsesRequest_DeprecatedFunctionsCompatibility(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"functions":[{"name":"search","description":"Search","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}],"function_call":{"name":"search"}}`
+	body, err := openAIToResponsesRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	tools, ok := req["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %v, want one converted function tool", req["tools"])
+	}
+	tool := tools[0].(map[string]any)
+	if tool["type"] != "function" || tool["name"] != "search" {
+		t.Fatalf("converted tool = %v, want function/search", tool)
+	}
+	choice, ok := req["tool_choice"].(map[string]any)
+	if !ok || choice["type"] != "function" || choice["name"] != "search" {
+		t.Fatalf("tool_choice = %v, want function search", req["tool_choice"])
+	}
+}
+
+func TestOpenAIToAnthropicRequest_DeprecatedFunctionsCompatibility(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"max_completion_tokens":100,"functions":[{"name":"search","description":"Search","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}],"function_call":{"name":"search"}}`
+	body, err := openAIToAnthropicRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	tools, ok := req["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %v, want one converted tool", req["tools"])
+	}
+	tool := tools[0].(map[string]any)
+	if tool["name"] != "search" || tool["input_schema"] == nil {
+		t.Fatalf("converted tool = %v, want anthropic-compatible search tool", tool)
+	}
+	choice, ok := req["tool_choice"].(map[string]any)
+	if !ok || choice["type"] != "tool" || choice["name"] != "search" {
+		t.Fatalf("tool_choice = %v, want tool search", req["tool_choice"])
+	}
+}
+
 func TestOpenAIToAnthropicToolChoice(t *testing.T) {
 	input := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"max_completion_tokens":100,"tool_choice":"required"}`
 
@@ -678,6 +926,270 @@ func TestOpenAIToResponsesToolsPreservesToolResults(t *testing.T) {
 	output := items[3].(map[string]any)
 	if output["type"] != "function_call_output" || output["call_id"] != "call_abc" || output["output"] != "sunny" {
 		t.Fatalf("input[3] = %v, want function_call_output sunny", output)
+	}
+}
+
+func TestOpenAIToAnthropicRequest_FileURLCompatibility(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"file","file":{"file_url":"https://example.com/doc.pdf","filename":"doc.pdf"}},{"type":"text","text":"summarize this"}]}],"max_completion_tokens":100}`
+	body, err := openAIToAnthropicRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	messages := req["messages"].([]any)
+	content := messages[0].(map[string]any)["content"].([]any)
+	doc := content[0].(map[string]any)
+	if doc["type"] != "document" {
+		t.Fatalf("document block = %v, want document", doc)
+	}
+	source := doc["source"].(map[string]any)
+	if source["type"] != "url" || source["url"] != "https://example.com/doc.pdf" {
+		t.Fatalf("document source = %v, want url doc.pdf", source)
+	}
+	if doc["title"] != "doc.pdf" {
+		t.Fatalf("document title = %v, want doc.pdf", doc["title"])
+	}
+	text := content[1].(map[string]any)
+	if text["type"] != "text" || text["text"] != "summarize this" {
+		t.Fatalf("text block = %v, want summarize text", text)
+	}
+}
+
+func TestResponsesToAnthropicRequest_InputFileURLCompatibility(t *testing.T) {
+	input := `{"model":"gpt-4","input":[{"role":"user","content":[{"type":"input_file","file_url":"https://example.com/doc.pdf","filename":"doc.pdf"},{"type":"input_text","text":"summarize this"}]}]}`
+	body, err := responsesToAnthropicRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	messages := req["messages"].([]any)
+	content := messages[0].(map[string]any)["content"].([]any)
+	doc := content[0].(map[string]any)
+	if doc["type"] != "document" {
+		t.Fatalf("document block = %v, want document", doc)
+	}
+	source := doc["source"].(map[string]any)
+	if source["type"] != "url" || source["url"] != "https://example.com/doc.pdf" {
+		t.Fatalf("document source = %v, want url doc.pdf", source)
+	}
+	if doc["title"] != "doc.pdf" {
+		t.Fatalf("document title = %v, want doc.pdf", doc["title"])
+	}
+	text := content[1].(map[string]any)
+	if text["type"] != "text" || text["text"] != "summarize this" {
+		t.Fatalf("text block = %v, want summarize text", text)
+	}
+}
+
+func TestOpenAIToAnthropicRequest_FileURLDerivesTitle(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"file","file":{"file_url":"https://example.com/files/report.pdf"}}]}],"max_completion_tokens":100}`
+	body, err := openAIToAnthropicRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	content := req["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	doc := content[0].(map[string]any)
+	if doc["title"] != "report.pdf" {
+		t.Fatalf("title = %v, want report.pdf", doc["title"])
+	}
+}
+
+func TestResponsesToAnthropicRequest_InputFileURLDerivesTitle(t *testing.T) {
+	input := `{"model":"gpt-4","input":[{"role":"user","content":[{"type":"input_file","file_url":"https://example.com/files/report.pdf"}]}]}`
+	body, err := responsesToAnthropicRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	content := req["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	doc := content[0].(map[string]any)
+	if doc["title"] != "report.pdf" {
+		t.Fatalf("title = %v, want report.pdf", doc["title"])
+	}
+}
+
+func TestOpenAIToAnthropicRequest_FileDataCompatibility(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"file","file":{"file_data":"cGRmLWRhdGE=","filename":"doc.pdf"}},{"type":"text","text":"summarize this"}]}],"max_completion_tokens":100}`
+	body, err := openAIToAnthropicRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	messages := req["messages"].([]any)
+	content := messages[0].(map[string]any)["content"].([]any)
+	doc := content[0].(map[string]any)
+	source := doc["source"].(map[string]any)
+	if source["type"] != "base64" || source["media_type"] != "application/pdf" || source["data"] != "cGRmLWRhdGE=" {
+		t.Fatalf("document source = %v, want base64 application/pdf", source)
+	}
+	if doc["title"] != "doc.pdf" {
+		t.Fatalf("document title = %v, want doc.pdf", doc["title"])
+	}
+}
+
+func TestResponsesToAnthropicRequest_InputFileDataCompatibility(t *testing.T) {
+	input := `{"model":"gpt-4","input":[{"role":"user","content":[{"type":"input_file","file_data":"cGRmLWRhdGE=","filename":"doc.pdf"},{"type":"input_text","text":"summarize this"}]}]}`
+	body, err := responsesToAnthropicRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	messages := req["messages"].([]any)
+	content := messages[0].(map[string]any)["content"].([]any)
+	doc := content[0].(map[string]any)
+	source := doc["source"].(map[string]any)
+	if source["type"] != "base64" || source["media_type"] != "application/pdf" || source["data"] != "cGRmLWRhdGE=" {
+		t.Fatalf("document source = %v, want base64 application/pdf", source)
+	}
+	if doc["title"] != "doc.pdf" {
+		t.Fatalf("document title = %v, want doc.pdf", doc["title"])
+	}
+}
+
+func TestOpenAIToAnthropicRequest_FileIDFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file_123"}}]}],"max_completion_tokens":100}`
+	_, err := openAIToAnthropicRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for file_id-only conversion, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to Anthropic document") {
+		t.Fatalf("error = %q, want explicit document conversion failure", err.Error())
+	}
+}
+
+func TestOpenAIToAnthropicRequest_FileWithoutPayloadFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"doc.pdf"}}]}],"max_completion_tokens":100}`
+	_, err := openAIToAnthropicRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for file without payload, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to Anthropic document") {
+		t.Fatalf("error = %q, want explicit document conversion failure", err.Error())
+	}
+}
+
+func TestOpenAIToAnthropicRequest_FileObjectMissingFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"file"}]}],"max_completion_tokens":100}`
+	_, err := openAIToAnthropicRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for missing file object, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to Anthropic document") {
+		t.Fatalf("error = %q, want explicit document conversion failure", err.Error())
+	}
+}
+
+func TestResponsesToAnthropicRequest_InputFileIDFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","input":[{"role":"user","content":[{"type":"input_file","file_id":"file_123"}]}]}`
+	_, err := responsesToAnthropicRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for input_file file_id-only conversion, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to Anthropic document") {
+		t.Fatalf("error = %q, want explicit document conversion failure", err.Error())
+	}
+}
+
+func TestOpenAIToResponsesRequest_FileWithoutPayloadFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"doc.pdf"}}]}]}`
+	_, err := openAIToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for file without payload, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to Responses input_file") {
+		t.Fatalf("error = %q, want explicit input_file conversion failure", err.Error())
+	}
+}
+
+func TestOpenAIToResponsesRequest_FileEmptyReferenceFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"file","file":{"file_url":""}}]}]}`
+	_, err := openAIToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for empty file reference, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to Responses input_file") {
+		t.Fatalf("error = %q, want explicit input_file conversion failure", err.Error())
+	}
+}
+
+func TestOpenAIToResponsesRequest_FileNonStringReferenceFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"file","file":{"file_url":123}}]}]}`
+	_, err := openAIToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for non-string file reference, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to Responses input_file") {
+		t.Fatalf("error = %q, want explicit input_file conversion failure", err.Error())
+	}
+}
+
+func TestOpenAIToResponsesRequest_FileObjectMissingFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"file"}]}]}`
+	_, err := openAIToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for missing file object, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to Responses input_file") {
+		t.Fatalf("error = %q, want explicit input_file conversion failure", err.Error())
+	}
+}
+
+func TestResponsesContentToOpenAI_EmptyInputFileFailsExplicitly(t *testing.T) {
+	_, err := convertResponsesContentToOpenAI([]any{map[string]any{"type": "input_file"}})
+	if err == nil {
+		t.Fatal("expected error for empty input_file, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to OpenAI file content") {
+		t.Fatalf("error = %q, want explicit file conversion failure", err.Error())
+	}
+}
+
+func TestResponsesContentToOpenAI_FilenameOnlyInputFileFailsExplicitly(t *testing.T) {
+	_, err := convertResponsesContentToOpenAI([]any{map[string]any{"type": "input_file", "filename": "doc.pdf"}})
+	if err == nil {
+		t.Fatal("expected error for filename-only input_file, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to OpenAI file content") {
+		t.Fatalf("error = %q, want explicit file conversion failure", err.Error())
+	}
+}
+
+func TestResponsesContentToOpenAI_EmptyReferenceFailsExplicitly(t *testing.T) {
+	_, err := convertResponsesContentToOpenAI([]any{map[string]any{"type": "input_file", "file_url": ""}})
+	if err == nil {
+		t.Fatal("expected error for empty input_file reference, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to OpenAI file content") {
+		t.Fatalf("error = %q, want explicit file conversion failure", err.Error())
+	}
+}
+
+func TestResponsesContentToOpenAI_NonStringReferenceFailsExplicitly(t *testing.T) {
+	_, err := convertResponsesContentToOpenAI([]any{map[string]any{"type": "input_file", "file_url": 123}})
+	if err == nil {
+		t.Fatal("expected error for non-string input_file reference, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to OpenAI file content") {
+		t.Fatalf("error = %q, want explicit file conversion failure", err.Error())
 	}
 }
 
@@ -741,6 +1253,197 @@ func TestAnthropicToOpenAIMixedToolResultContent(t *testing.T) {
 	}
 }
 
+func TestAnthropicToOpenAIRequest_ToolResultNonTextContentFailsExplicitly(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}]}]}],"max_tokens":100}`
+	_, err := anthropicToOpenAIRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for non-text tool_result content, got nil")
+	}
+	if !containsSubstring(err.Error(), "tool_result") {
+		t.Fatalf("error = %q, want mention of tool_result", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestAnthropicToResponsesRequest_ToolResultNonTextContentFailsExplicitly(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"cGRm"}}]}]}],"max_tokens":100}`
+	_, err := anthropicToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for non-text tool_result content, got nil")
+	}
+	if !containsSubstring(err.Error(), "tool_result") {
+		t.Fatalf("error = %q, want mention of tool_result", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestOpenAIToResponsesRequest_ToolMessageNonTextContentFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_abc","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]}`
+	_, err := openAIToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for non-text tool message content, got nil")
+	}
+	if !containsSubstring(err.Error(), "tool") {
+		t.Fatalf("error = %q, want mention of tool content", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestAnthropicToOpenAIRequest_DocumentBlockCompatibility(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"cGRmLWRhdGE="}},{"type":"text","text":"summarize this"}]}],"max_tokens":100}`
+	body, err := anthropicToOpenAIRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	messages := req["messages"].([]any)
+	content := messages[0].(map[string]any)["content"].([]any)
+	filePart := content[0].(map[string]any)
+	if filePart["type"] != "file" {
+		t.Fatalf("file part type = %v, want file", filePart["type"])
+	}
+	file := filePart["file"].(map[string]any)
+	if file["file_data"] != "cGRmLWRhdGE=" {
+		t.Fatalf("file_data = %v, want anthropic base64 payload", file["file_data"])
+	}
+	textPart := content[1].(map[string]any)
+	if textPart["type"] != "text" || textPart["text"] != "summarize this" {
+		t.Fatalf("text part = %v, want summarize text", textPart)
+	}
+}
+
+func TestAnthropicToOpenAIRequest_DocumentMissingSourceFailsExplicitly(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"document"}]}],"max_tokens":100}`
+	_, err := anthropicToOpenAIRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for missing document source, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to OpenAI/Responses file content") {
+		t.Fatalf("error = %q, want explicit document conversion failure", err.Error())
+	}
+}
+
+func TestAnthropicToOpenAIRequest_DocumentUnsupportedSourceFailsExplicitly(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"document","source":{"type":"file_id","id":"doc_123"}}]}],"max_tokens":100}`
+	_, err := anthropicToOpenAIRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for unsupported document source, got nil")
+	}
+	if !containsSubstring(err.Error(), "cannot be converted to OpenAI/Responses file content") {
+		t.Fatalf("error = %q, want explicit document conversion failure", err.Error())
+	}
+}
+
+func TestAnthropicToResponsesRequest_DocumentBlockCompatibility(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"cGRmLWRhdGE="}},{"type":"text","text":"summarize this"}]}],"max_tokens":100}`
+	body, err := anthropicToResponsesRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	inputItems := req["input"].([]any)
+	content := inputItems[0].(map[string]any)["content"].([]any)
+	filePart := content[0].(map[string]any)
+	if filePart["type"] != "input_file" {
+		t.Fatalf("file part type = %v, want input_file", filePart["type"])
+	}
+	if filePart["file_data"] != "cGRmLWRhdGE=" {
+		t.Fatalf("file_data = %v, want anthropic base64 payload", filePart["file_data"])
+	}
+	textPart := content[1].(map[string]any)
+	if textPart["type"] != "input_text" || textPart["text"] != "summarize this" {
+		t.Fatalf("text part = %v, want summarize text", textPart)
+	}
+}
+
+func TestAnthropicToOpenAIRequest_DocumentURLDerivesFilename(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"document","source":{"type":"url","url":"https://example.com/files/report.pdf"}}]}],"max_tokens":100}`
+	body, err := anthropicToOpenAIRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	content := req["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	file := content[0].(map[string]any)["file"].(map[string]any)
+	if file["file_url"] != "https://example.com/files/report.pdf" {
+		t.Fatalf("file = %v, want file_url preserved", file)
+	}
+	if file["filename"] != "report.pdf" {
+		t.Fatalf("filename = %v, want report.pdf", file["filename"])
+	}
+}
+
+func TestAnthropicToOpenAIRequest_DocumentBase64DerivesFilename(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"cGRmLWRhdGE="}}]}],"max_tokens":100}`
+	body, err := anthropicToOpenAIRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	content := req["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	file := content[0].(map[string]any)["file"].(map[string]any)
+	if file["filename"] != "document.pdf" {
+		t.Fatalf("filename = %v, want document.pdf", file["filename"])
+	}
+}
+
+func TestAnthropicToResponsesRequest_DocumentURLDerivesFilename(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"document","source":{"type":"url","url":"https://example.com/files/report.pdf"}}]}],"max_tokens":100}`
+	body, err := anthropicToResponsesRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	content := req["input"].([]any)[0].(map[string]any)["content"].([]any)
+	file := content[0].(map[string]any)
+	if file["file_url"] != "https://example.com/files/report.pdf" {
+		t.Fatalf("file = %v, want file_url preserved", file)
+	}
+	if file["filename"] != "report.pdf" {
+		t.Fatalf("filename = %v, want report.pdf", file["filename"])
+	}
+}
+
+func TestAnthropicToResponsesRequest_DocumentBase64DerivesFilename(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"cGRmLWRhdGE="}}]}],"max_tokens":100}`
+	body, err := anthropicToResponsesRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	content := req["input"].([]any)[0].(map[string]any)["content"].([]any)
+	file := content[0].(map[string]any)
+	if file["filename"] != "document.pdf" {
+		t.Fatalf("filename = %v, want document.pdf", file["filename"])
+	}
+}
+
 func TestTransformingWriterDelaysContentLengthUntilConverted(t *testing.T) {
 	conv, err := NewConverter(FormatOpenAI, FormatResponses)
 	if err != nil {
@@ -795,6 +1498,582 @@ func TestSchemaMappingPreservesRequestControls(t *testing.T) {
 	format := text["format"].(map[string]any)
 	if format["type"] != "json_schema" || responses["safety_identifier"] != "user-1" || responses["prompt_cache_key"] != "bucket" {
 		t.Fatalf("Responses controls were not mapped: %v", responses)
+	}
+}
+
+func TestResponsesToOpenAIRequest_UnsupportedTextFormatFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","input":"Hi","text":{"format":{"type":"xml_schema","schema":{"name":"x"}}}}`
+	for name, convert := range map[string]func([]byte) ([]byte, error){
+		"openai":    responsesToOpenAIRequest,
+		"anthropic": responsesToAnthropicRequest,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := convert([]byte(input))
+			if err == nil {
+				t.Fatal("expected explicit error for unsupported text.format, got nil")
+			}
+			if !containsSubstring(err.Error(), "text.format") {
+				t.Fatalf("error = %q, want mention of text.format", err.Error())
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestOpenAIToResponsesRequest_UnsupportedResponseFormatFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"response_format":{"type":"xml_schema","schema":{"name":"x"}}}`
+	_, err := openAIToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for unsupported response_format, got nil")
+	}
+	if !containsSubstring(err.Error(), "response_format") {
+		t.Fatalf("error = %q, want mention of response_format", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestResponsesStatefulRequestFieldsFailExplicitly(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		convert   func([]byte) ([]byte, error)
+		wantField string
+	}{
+		{
+			name:      "previous_response_id to openai",
+			input:     `{"model":"gpt-4","input":"Hi","previous_response_id":"resp_123"}`,
+			convert:   responsesToOpenAIRequest,
+			wantField: "previous_response_id",
+		},
+		{
+			name:      "conversation to anthropic",
+			input:     `{"model":"gpt-4","input":"Hi","conversation":"conv_123"}`,
+			convert:   responsesToAnthropicRequest,
+			wantField: "conversation",
+		},
+		{
+			name:      "store true to openai",
+			input:     `{"model":"gpt-4","input":"Hi","store":true}`,
+			convert:   responsesToOpenAIRequest,
+			wantField: "store",
+		},
+		{
+			name:      "background true to anthropic",
+			input:     `{"model":"gpt-4","input":"Hi","background":true}`,
+			convert:   responsesToAnthropicRequest,
+			wantField: "background",
+		},
+		{
+			name:      "include to openai",
+			input:     `{"model":"gpt-4","input":"Hi","include":["message.output_text.logprobs"]}`,
+			convert:   responsesToOpenAIRequest,
+			wantField: "include",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.convert([]byte(tt.input))
+			if err == nil {
+				t.Fatalf("expected explicit error for %s, got nil", tt.wantField)
+			}
+			if !containsSubstring(err.Error(), tt.wantField) {
+				t.Fatalf("error = %q, want mention of %s", err.Error(), tt.wantField)
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestOpenAIToResponsesRequest_PreservesPortableChatControls(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"presence_penalty":0.2,"frequency_penalty":0.4,"seed":42,"logprobs":true,"top_logprobs":3}`
+	body, err := openAIToResponsesRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal converted request: %v", err)
+	}
+
+	if req["presence_penalty"] != 0.2 {
+		t.Fatalf("presence_penalty = %v, want 0.2", req["presence_penalty"])
+	}
+	if req["frequency_penalty"] != 0.4 {
+		t.Fatalf("frequency_penalty = %v, want 0.4", req["frequency_penalty"])
+	}
+	if req["seed"] != 42.0 {
+		t.Fatalf("seed = %v, want 42", req["seed"])
+	}
+	if req["logprobs"] != true {
+		t.Fatalf("logprobs = %v, want true", req["logprobs"])
+	}
+	if req["top_logprobs"] != 3.0 {
+		t.Fatalf("top_logprobs = %v, want 3", req["top_logprobs"])
+	}
+}
+
+func TestAnthropicToolChoiceDisableParallelToolUseMapsToParallelToolCalls(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"tool_choice":{"type":"auto","disable_parallel_tool_use":true}}`
+
+	openAIBody, err := anthropicToOpenAIRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("anthropic→openai: unexpected error: %v", err)
+	}
+	var openAIReq map[string]any
+	if err := json.Unmarshal(openAIBody, &openAIReq); err != nil {
+		t.Fatalf("failed to unmarshal OpenAI request: %v", err)
+	}
+	if openAIReq["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice = %v, want auto", openAIReq["tool_choice"])
+	}
+	if openAIReq["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls = %v, want false", openAIReq["parallel_tool_calls"])
+	}
+
+	responsesBody, err := anthropicToResponsesRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("anthropic→responses: unexpected error: %v", err)
+	}
+	var responsesReq map[string]any
+	if err := json.Unmarshal(responsesBody, &responsesReq); err != nil {
+		t.Fatalf("failed to unmarshal Responses request: %v", err)
+	}
+	if responsesReq["tool_choice"] != "auto" {
+		t.Fatalf("responses tool_choice = %v, want auto", responsesReq["tool_choice"])
+	}
+	if responsesReq["parallel_tool_calls"] != false {
+		t.Fatalf("responses parallel_tool_calls = %v, want false", responsesReq["parallel_tool_calls"])
+	}
+}
+
+func TestAnthropicToolChoiceFormsMapToResponses(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		wantToolChoice any
+	}{
+		{
+			name:           "auto",
+			input:          `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"tool_choice":{"type":"auto"}}`,
+			wantToolChoice: "auto",
+		},
+		{
+			name:           "any",
+			input:          `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"tool_choice":{"type":"any"}}`,
+			wantToolChoice: "required",
+		},
+		{
+			name:  "named tool",
+			input: `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"tool_choice":{"type":"tool","name":"lookup"}}`,
+			wantToolChoice: map[string]any{
+				"type": "function",
+				"name": "lookup",
+			},
+		},
+		{
+			name:           "none",
+			input:          `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"tool_choice":{"type":"none"}}`,
+			wantToolChoice: "none",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := anthropicToResponsesRequest([]byte(tt.input))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var req map[string]any
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatalf("failed to unmarshal Responses request: %v", err)
+			}
+			got := req["tool_choice"]
+			switch want := tt.wantToolChoice.(type) {
+			case string:
+				if got != want {
+					t.Fatalf("tool_choice = %v, want %v", got, want)
+				}
+			case map[string]any:
+				choice, ok := got.(map[string]any)
+				if !ok {
+					t.Fatalf("tool_choice = %T, want map[string]any", got)
+				}
+				if choice["type"] != want["type"] || choice["name"] != want["name"] {
+					t.Fatalf("tool_choice = %v, want %v", choice, want)
+				}
+			}
+		})
+	}
+}
+
+func TestAnthropicThinkingRequestFailsExplicitlyOnStatelessTargets(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"thinking":{"type":"enabled","budget_tokens":1024}}`
+
+	for name, convert := range map[string]func([]byte) ([]byte, error){
+		"openai":    anthropicToOpenAIRequest,
+		"responses": anthropicToResponsesRequest,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := convert([]byte(input))
+			if err == nil {
+				t.Fatal("expected explicit thinking conversion error, got nil")
+			}
+			if !containsSubstring(err.Error(), "thinking") {
+				t.Fatalf("error = %q, want mention of thinking", err.Error())
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestResponsesUnsupportedRequestFieldsFailExplicitly(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		convert   func([]byte) ([]byte, error)
+		wantField string
+	}{
+		{
+			name:      "reasoning to openai",
+			input:     `{"model":"gpt-4","input":"Hi","reasoning":{"effort":"high"}}`,
+			convert:   responsesToOpenAIRequest,
+			wantField: "reasoning",
+		},
+		{
+			name:      "truncation to anthropic",
+			input:     `{"model":"gpt-4","input":"Hi","truncation":"auto"}`,
+			convert:   responsesToAnthropicRequest,
+			wantField: "truncation",
+		},
+		{
+			name:      "max_tool_calls to openai",
+			input:     `{"model":"gpt-4","input":"Hi","max_tool_calls":2}`,
+			convert:   responsesToOpenAIRequest,
+			wantField: "max_tool_calls",
+		},
+		{
+			name:      "prompt to anthropic",
+			input:     `{"model":"gpt-4","input":"Hi","prompt":{"id":"pmpt_123"}}`,
+			convert:   responsesToAnthropicRequest,
+			wantField: "prompt",
+		},
+		{
+			name:      "context_management to openai",
+			input:     `{"model":"gpt-4","input":"Hi","context_management":{"type":"auto"}}`,
+			convert:   responsesToOpenAIRequest,
+			wantField: "context_management",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.convert([]byte(tt.input))
+			if err == nil {
+				t.Fatalf("expected explicit error for %s, got nil", tt.wantField)
+			}
+			if !containsSubstring(err.Error(), tt.wantField) {
+				t.Fatalf("error = %q, want mention of %s", err.Error(), tt.wantField)
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestAnthropicUnsupportedRequestFieldsFailExplicitly(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		convert   func([]byte) ([]byte, error)
+		wantField string
+	}{
+		{
+			name:      "output_config to openai",
+			input:     `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"output_config":{"format":{"type":"json_schema","name":"x"}}}`,
+			convert:   anthropicToOpenAIRequest,
+			wantField: "output_config",
+		},
+		{
+			name:      "container to responses",
+			input:     `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"container":"ctr_123"}`,
+			convert:   anthropicToResponsesRequest,
+			wantField: "container",
+		},
+		{
+			name:      "inference_geo to openai",
+			input:     `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"inference_geo":"us"}`,
+			convert:   anthropicToOpenAIRequest,
+			wantField: "inference_geo",
+		},
+		{
+			name:      "top_k to responses",
+			input:     `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"top_k":5}`,
+			convert:   anthropicToResponsesRequest,
+			wantField: "top_k",
+		},
+		{
+			name:      "cache_control to openai",
+			input:     `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"cache_control":{"type":"ephemeral"}}`,
+			convert:   anthropicToOpenAIRequest,
+			wantField: "cache_control",
+		},
+		{
+			name:      "mcp_servers to responses",
+			input:     `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"mcp_servers":[{"url":"https://example.com/mcp"}]}`,
+			convert:   anthropicToResponsesRequest,
+			wantField: "mcp_servers",
+		},
+		{
+			name:      "user_profile_id to openai",
+			input:     `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"user_profile_id":"profile_123"}`,
+			convert:   anthropicToOpenAIRequest,
+			wantField: "user_profile_id",
+		},
+		{
+			name:      "speed to responses",
+			input:     `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"speed":"default"}`,
+			convert:   anthropicToResponsesRequest,
+			wantField: "speed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.convert([]byte(tt.input))
+			if err == nil {
+				t.Fatalf("expected explicit error for %s, got nil", tt.wantField)
+			}
+			if !containsSubstring(err.Error(), tt.wantField) {
+				t.Fatalf("error = %q, want mention of %s", err.Error(), tt.wantField)
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestOpenAIUnsupportedRequestFieldsFailExplicitly(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		convert   func([]byte) ([]byte, error)
+		wantField string
+	}{
+		{
+			name:      "n greater than one to responses",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"n":2}`,
+			convert:   openAIToResponsesRequest,
+			wantField: "n",
+		},
+		{
+			name:      "n greater than one to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"n":2}`,
+			convert:   openAIToAnthropicRequest,
+			wantField: "n",
+		},
+		{
+			name:      "logit_bias to responses",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"logit_bias":{"42":5}}`,
+			convert:   openAIToResponsesRequest,
+			wantField: "logit_bias",
+		},
+		{
+			name:      "logit_bias to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"logit_bias":{"42":5}}`,
+			convert:   openAIToAnthropicRequest,
+			wantField: "logit_bias",
+		},
+		{
+			name:      "prediction to responses",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"prediction":{"type":"content","content":"Hello"}}`,
+			convert:   openAIToResponsesRequest,
+			wantField: "prediction",
+		},
+		{
+			name:      "prediction to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"prediction":{"type":"content","content":"Hello"}}`,
+			convert:   openAIToAnthropicRequest,
+			wantField: "prediction",
+		},
+		{
+			name:      "audio to responses",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"audio":{"voice":"alloy","format":"wav"}}`,
+			convert:   openAIToResponsesRequest,
+			wantField: "audio",
+		},
+		{
+			name:      "audio to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"audio":{"voice":"alloy","format":"wav"}}`,
+			convert:   openAIToAnthropicRequest,
+			wantField: "audio",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.convert([]byte(tt.input))
+			if err == nil {
+				t.Fatalf("expected explicit error for %s, got nil", tt.wantField)
+			}
+			if !containsSubstring(err.Error(), tt.wantField) {
+				t.Fatalf("error = %q, want mention of %s", err.Error(), tt.wantField)
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestOpenAIUnsupportedRequestFieldsAllowBoundaryValues(t *testing.T) {
+	t.Run("n equals one to responses passes", func(t *testing.T) {
+		input := `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"n":1}`
+		body, err := openAIToResponsesRequest([]byte(input))
+		if err != nil {
+			t.Fatalf("expected nil error for n=1, got: %v", err)
+		}
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("failed to unmarshal converted request: %v", err)
+		}
+		if req["model"] != "gpt-4" {
+			t.Fatalf("model = %v, want gpt-4", req["model"])
+		}
+	})
+
+	t.Run("explicit null fields do not reject", func(t *testing.T) {
+		input := `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"logit_bias":null,"prediction":null,"audio":null}`
+		for name, convert := range map[string]func([]byte) ([]byte, error){
+			"responses": openAIToResponsesRequest,
+			"anthropic": openAIToAnthropicRequest,
+		} {
+			t.Run(name, func(t *testing.T) {
+				_, err := convert([]byte(input))
+				if err != nil {
+					t.Fatalf("expected nil error for explicit-null fields, got: %v", err)
+				}
+			})
+		}
+	})
+}
+
+func TestResponsesTextVerbosityFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","input":"Hi","text":{"format":{"type":"json_object"},"verbosity":"high"}}`
+	for name, convert := range map[string]func([]byte) ([]byte, error){
+		"openai":    responsesToOpenAIRequest,
+		"anthropic": responsesToAnthropicRequest,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := convert([]byte(input))
+			if err == nil {
+				t.Fatal("expected explicit verbosity conversion error, got nil")
+			}
+			if !containsSubstring(err.Error(), "text.verbosity") {
+				t.Fatalf("error = %q, want mention of text.verbosity", err.Error())
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestAnthropicRequestPreservesServiceTier(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":"Hi"}],"max_tokens":100,"service_tier":"standard_only"}`
+
+	openAIBody, err := anthropicToOpenAIRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("anthropic→openai: unexpected error: %v", err)
+	}
+	var openAIReq map[string]any
+	if err := json.Unmarshal(openAIBody, &openAIReq); err != nil {
+		t.Fatalf("failed to unmarshal OpenAI request: %v", err)
+	}
+	if openAIReq["service_tier"] != "standard_only" {
+		t.Fatalf("openai service_tier = %v, want standard_only", openAIReq["service_tier"])
+	}
+
+	responsesBody, err := anthropicToResponsesRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("anthropic→responses: unexpected error: %v", err)
+	}
+	var responsesReq map[string]any
+	if err := json.Unmarshal(responsesBody, &responsesReq); err != nil {
+		t.Fatalf("failed to unmarshal Responses request: %v", err)
+	}
+	if responsesReq["service_tier"] != "standard_only" {
+		t.Fatalf("responses service_tier = %v, want standard_only", responsesReq["service_tier"])
+	}
+}
+
+func TestOpenAIToAnthropicUnsupportedRequestFieldsFailExplicitly(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantField string
+	}{
+		{
+			name:      "response_format to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"x"}}}`,
+			wantField: "response_format",
+		},
+		{
+			name:      "stream_options to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"stream":true,"stream_options":{"include_usage":true}}`,
+			wantField: "stream_options",
+		},
+		{
+			name:      "top_logprobs to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"top_logprobs":3}`,
+			wantField: "top_logprobs",
+		},
+		{
+			name:      "presence_penalty to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"presence_penalty":0.2}`,
+			wantField: "presence_penalty",
+		},
+		{
+			name:      "frequency_penalty to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"frequency_penalty":0.4}`,
+			wantField: "frequency_penalty",
+		},
+		{
+			name:      "seed to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"seed":42}`,
+			wantField: "seed",
+		},
+		{
+			name:      "logprobs to anthropic",
+			input:     `{"model":"gpt-4","messages":[{"role":"user","content":"Hi"}],"logprobs":true}`,
+			wantField: "logprobs",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := openAIToAnthropicRequest([]byte(tt.input))
+			if err == nil {
+				t.Fatalf("expected explicit error for %s, got nil", tt.wantField)
+			}
+			if !containsSubstring(err.Error(), tt.wantField) {
+				t.Fatalf("error = %q, want mention of %s", err.Error(), tt.wantField)
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
 	}
 }
 
@@ -931,6 +2210,296 @@ func TestConvertOpenAIResponseToAnthropic_WithToolUse(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected tool_use block in content")
+	}
+}
+
+func TestConvertOpenAIResponseToAnthropic_MultiChoiceFailsExplicitly(t *testing.T) {
+	input := `{"id":"chatcmpl-123","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"first"},"finish_reason":"stop"},{"index":1,"message":{"role":"assistant","content":"second"},"finish_reason":"stop"}]}`
+	_, err := convertOpenAIResponseToAnthropic([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for multi-choice chat response, got nil")
+	}
+	if !containsSubstring(err.Error(), "choices") {
+		t.Fatalf("error = %q, want mention of choices", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertOpenAIResponseToAnthropic_LogprobsFailExplicitly(t *testing.T) {
+	input := `{"id":"chatcmpl-123","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"Hello!"},"finish_reason":"stop","logprobs":{"content":[{"token":"Hello"}]}}]}`
+	_, err := convertOpenAIResponseToAnthropic([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for chat response logprobs, got nil")
+	}
+	if !containsSubstring(err.Error(), "logprobs") {
+		t.Fatalf("error = %q, want mention of logprobs", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertOpenAIResponseToAnthropic_PreservesRefusal(t *testing.T) {
+	input := `{"id":"chatcmpl-123","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"","refusal":"I can't help with that."},"finish_reason":"content_filter"}]}`
+	body, err := convertOpenAIResponseToAnthropic([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if resp["stop_reason"] != "refusal" {
+		t.Fatalf("stop_reason = %v, want refusal", resp["stop_reason"])
+	}
+	content := resp["content"].([]any)
+	text := content[0].(map[string]any)
+	if text["type"] != "text" || text["text"] != "I can't help with that." {
+		t.Fatalf("content = %v, want refusal text block", text)
+	}
+}
+
+func TestConvertAnthropicResponseToOpenAI_PreservesRefusal(t *testing.T) {
+	input := `{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"I can't help with that."}],"model":"claude-3","stop_reason":"refusal"}`
+	body, err := convertAnthropicResponseToOpenAI([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	choice := resp["choices"].([]any)[0].(map[string]any)
+	msg := choice["message"].(map[string]any)
+	if msg["refusal"] != "I can't help with that." {
+		t.Fatalf("refusal = %v, want refusal preserved", msg["refusal"])
+	}
+	if choice["finish_reason"] != "content_filter" {
+		t.Fatalf("finish_reason = %v, want content_filter", choice["finish_reason"])
+	}
+	if msg["content"] != "" {
+		t.Fatalf("content = %v, want empty string for refusal-only output", msg["content"])
+	}
+}
+
+func TestConvertAnthropicResponseToOpenAI_UnsupportedContentBlockFailsExplicitly(t *testing.T) {
+	input := `{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"internal reasoning","signature":"sig_123"}],"model":"claude-3","stop_reason":"end_turn"}`
+	_, err := convertAnthropicResponseToOpenAI([]byte(input))
+	if err == nil {
+		t.Fatal("expected explicit error for unsupported Anthropic content block, got nil")
+	}
+	if !containsSubstring(err.Error(), "content block") {
+		t.Fatalf("error = %q, want mention of content block", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertResponsesResponseToAnthropic_PreservesRefusal(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I can't help with that."}]}]}`
+	body, err := convertResponsesResponseMapToAnthropic(mustUnmarshalMap(t, input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if body["stop_reason"] != "refusal" {
+		t.Fatalf("stop_reason = %v, want refusal", body["stop_reason"])
+	}
+	content := body["content"].([]any)
+	text := content[0].(map[string]any)
+	if text["type"] != "text" || text["text"] != "I can't help with that." {
+		t.Fatalf("content = %v, want refusal text block", text)
+	}
+}
+
+func TestConvertResponsesResponseToAnthropic_UnsupportedOutputItemFailsExplicitly(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"web_search_call","id":"ws_1","status":"completed"}]}`
+	_, err := convertResponsesResponseMapToAnthropic(mustUnmarshalMap(t, input))
+	if err == nil {
+		t.Fatal("expected explicit error for unsupported Responses output item, got nil")
+	}
+	if !containsSubstring(err.Error(), "output item") {
+		t.Fatalf("error = %q, want mention of output item", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertResponsesResponseToAnthropic_RepeatedMessageItemsFailExplicitly(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second"}]}]}`
+	_, err := convertResponsesResponseMapToAnthropic(mustUnmarshalMap(t, input))
+	if err == nil {
+		t.Fatal("expected explicit error for repeated Responses message items, got nil")
+	}
+	if !containsSubstring(err.Error(), "multiple message output items") {
+		t.Fatalf("error = %q, want mention of multiple message output items", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertResponsesResponseToAnthropic_UnsupportedMessageContentPartFailsExplicitly(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"reasoning_text","text":"internal"}]}]}`
+	_, err := convertResponsesResponseMapToAnthropic(mustUnmarshalMap(t, input))
+	if err == nil {
+		t.Fatal("expected explicit error for unsupported Responses message content part, got nil")
+	}
+	if !containsSubstring(err.Error(), "message content part") {
+		t.Fatalf("error = %q, want mention of message content part", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertResponsesResponseToAnthropic_OutputTextAnnotationsFailExplicitly(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello","annotations":[{"type":"url_citation","url":"https://example.com"}]}]}]}`
+	_, err := convertResponsesResponseMapToAnthropic(mustUnmarshalMap(t, input))
+	if err == nil {
+		t.Fatal("expected explicit error for output_text annotations, got nil")
+	}
+	if !containsSubstring(err.Error(), "annotations") {
+		t.Fatalf("error = %q, want mention of annotations", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertResponsesResponseToAnthropic_OutputTextLogprobsFailExplicitly(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello","logprobs":[{"token":"hello"}]}]}]}`
+	_, err := convertResponsesResponseMapToAnthropic(mustUnmarshalMap(t, input))
+	if err == nil {
+		t.Fatal("expected explicit error for output_text logprobs, got nil")
+	}
+	if !containsSubstring(err.Error(), "logprobs") {
+		t.Fatalf("error = %q, want mention of logprobs", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
+func TestConvertResponsesResponseToAnthropic_UnsupportedStatusFailsExplicitly(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "queued", status: "queued"},
+		{name: "in_progress", status: "in_progress"},
+		{name: "failed", status: "failed"},
+		{name: "cancelled", status: "cancelled"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := fmt.Sprintf(`{"id":"resp_123","object":"response","model":"gpt-4","status":%q,"output":[]}`, tt.status)
+			_, err := convertResponsesResponseMapToAnthropic(mustUnmarshalMap(t, input))
+			if err == nil {
+				t.Fatalf("expected explicit error for status %s, got nil", tt.status)
+			}
+			if !containsSubstring(err.Error(), "status") {
+				t.Fatalf("error = %q, want mention of status", err.Error())
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestConvertAnthropicResponseToResponses_PreservesRefusal(t *testing.T) {
+	input := `{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"I can't help with that."}],"model":"claude-3","stop_reason":"refusal"}`
+	body, err := convertAnthropicResponseMapToResponses(mustUnmarshalMap(t, input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	output := body["output"].([]any)
+	message := output[0].(map[string]any)
+	content := message["content"].([]any)
+	refusal := content[0].(map[string]any)
+	if refusal["type"] != "refusal" || refusal["refusal"] != "I can't help with that." {
+		t.Fatalf("content = %v, want refusal block", refusal)
+	}
+}
+
+func TestConvertAnthropicResponseToResponses_PreservesMultipleTextBlocks(t *testing.T) {
+	input := `{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}],"model":"claude-3","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":2}}`
+	body, err := convertAnthropicResponseMapToResponses(mustUnmarshalMap(t, input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	output := body["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("output length = %d, want 1: %s", len(output), mustMarshal(output))
+	}
+	message := output[0].(map[string]any)
+	content := message["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content length = %d, want 2: %s", len(content), mustMarshal(content))
+	}
+	if content[0].(map[string]any)["text"] != "first" || content[1].(map[string]any)["text"] != "second" {
+		t.Fatalf("content = %s, want ordered text blocks", mustMarshal(content))
+	}
+	if body["status"] != "completed" {
+		t.Fatalf("status = %v, want completed", body["status"])
+	}
+	usage := body["usage"].(map[string]any)
+	if toInt(usage["input_tokens"]) != 5 || toInt(usage["output_tokens"]) != 2 {
+		t.Fatalf("usage = %v, want preserved anthropic usage", usage)
+	}
+}
+
+func TestConvertAnthropicResponseToResponses_PreservesOrderedTextAndToolUse(t *testing.T) {
+	input := `{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"before"},{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"city":"Paris"}},{"type":"text","text":"after"}],"model":"claude-3","stop_reason":"tool_use","usage":{"input_tokens":5,"output_tokens":2,"service_tier":"standard","inference_geo":"us"}}`
+	body, err := convertAnthropicResponseMapToResponses(mustUnmarshalMap(t, input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	output := body["output"].([]any)
+	if len(output) != 3 {
+		t.Fatalf("output length = %d, want 3: %s", len(output), mustMarshal(output))
+	}
+	firstMsg := output[0].(map[string]any)
+	toolCall := output[1].(map[string]any)
+	secondMsg := output[2].(map[string]any)
+	if firstMsg["type"] != "message" || firstMsg["role"] != "assistant" {
+		t.Fatalf("first output = %s, want assistant message", mustMarshal(firstMsg))
+	}
+	firstContent := firstMsg["content"].([]any)
+	if len(firstContent) != 1 || firstContent[0].(map[string]any)["text"] != "before" {
+		t.Fatalf("first message content = %s, want first text block", mustMarshal(firstContent))
+	}
+	if toolCall["type"] != "function_call" || toolCall["call_id"] != "toolu_1" || toolCall["name"] != "lookup" {
+		t.Fatalf("tool call = %s, want preserved tool_use", mustMarshal(toolCall))
+	}
+	if toolCall["arguments"] != `{"city":"Paris"}` {
+		t.Fatalf("arguments = %v, want encoded tool input", toolCall["arguments"])
+	}
+	secondContent := secondMsg["content"].([]any)
+	if len(secondContent) != 1 || secondContent[0].(map[string]any)["text"] != "after" {
+		t.Fatalf("second message content = %s, want trailing text block", mustMarshal(secondContent))
+	}
+	if body["service_tier"] != "standard" || body["inference_geo"] != "us" {
+		t.Fatalf("body = %s, want top-level service_tier/inference_geo preserved", mustMarshal(body))
+	}
+}
+
+func TestConvertAnthropicResponseToResponses_UnsupportedContentBlockFailsExplicitly(t *testing.T) {
+	input := `{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"redacted_thinking","data":"opaque"}],"model":"claude-3","stop_reason":"end_turn"}`
+	_, err := convertAnthropicResponseMapToResponses(mustUnmarshalMap(t, input))
+	if err == nil {
+		t.Fatal("expected explicit error for unsupported Anthropic content block, got nil")
+	}
+	if !containsSubstring(err.Error(), "content block") {
+		t.Fatalf("error = %q, want mention of content block", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
 	}
 }
 
@@ -1096,8 +2665,6 @@ func TestConvertResponsesStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
 		"response.content_part.added",
 		"response.content_part.done",
 		"response.output_item.done",
-		"response.refusal.delta",
-		"response.refusal.done",
 		"response.reasoning_text.done",
 		"response.queued",
 	} {
@@ -1114,6 +2681,64 @@ func TestConvertResponsesStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
 	}
 }
 
+func TestConvertResponsesStreamToOpenAI_UnsupportedSemanticEventsFailExplicitly(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{
+			name:    "reasoning summary part added",
+			payload: `{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}`,
+			want:    "response.reasoning_summary_part.added",
+		},
+		{
+			name:    "reasoning summary text delta",
+			payload: `{"type":"response.reasoning_summary_text.delta","delta":"The problem"}`,
+			want:    "response.reasoning_summary_text.delta",
+		},
+		{
+			name:    "output text annotation added",
+			payload: `{"type":"response.output_text.annotation.added","annotation":{"type":"url_citation","url":"https://example.com"}}`,
+			want:    "response.output_text.annotation.added",
+		},
+		{
+			name:    "hosted web search event",
+			payload: `{"type":"response.web_search_call.in_progress","item_id":"ws_1"}`,
+			want:    "response.web_search_call.in_progress",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := convertResponsesStreamToOpenAI(nil, []byte(tt.payload))
+			if err == nil {
+				t.Fatal("expected explicit error for unsupported semantic event, got nil")
+			}
+			if !containsSubstring(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want mention of %s", err.Error(), tt.want)
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestConvertResponsesStreamToAnthropic_UnsupportedSemanticEventsFailExplicitly(t *testing.T) {
+	payload := `{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}`
+	_, err := convertResponsesStreamToAnthropic(&Converter{}, []byte(payload))
+	if err == nil {
+		t.Fatal("expected explicit error for unsupported semantic event, got nil")
+	}
+	if !containsSubstring(err.Error(), "response.reasoning_summary_part.added") {
+		t.Fatalf("error = %q, want mention of semantic event type", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
 func TestConvertAnthropicStreamToOpenAI_DropsUnknownEvent(t *testing.T) {
 	unknownEvt := `{"type":"custom_event","data":"payload"}`
 	result, err := convertAnthropicStreamToOpenAI(nil, []byte(unknownEvt))
@@ -1122,6 +2747,84 @@ func TestConvertAnthropicStreamToOpenAI_DropsUnknownEvent(t *testing.T) {
 	}
 	if result != nil {
 		t.Fatalf("expected unknown Anthropic event to be dropped, got: %s", string(result))
+	}
+}
+
+func TestConvertAnthropicStreamToOpenAI_UnsupportedSemanticEventsFailExplicitly(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{
+			name:    "citations delta",
+			payload: `{"type":"citations_delta","index":0,"citation":{"type":"char_location"}}`,
+			want:    "citations_delta",
+		},
+		{
+			name:    "signature delta",
+			payload: `{"type":"signature_delta","index":0,"signature":"abc"}`,
+			want:    "signature_delta",
+		},
+		{
+			name:    "error event",
+			payload: `{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`,
+			want:    "error",
+		},
+		{
+			name:    "server tool event",
+			payload: `{"type":"server_tool_use.delta","id":"st_1"}`,
+			want:    "server_tool_use.delta",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := convertAnthropicStreamToOpenAI(nil, []byte(tt.payload))
+			if err == nil {
+				t.Fatal("expected explicit error for unsupported anthropic semantic event, got nil")
+			}
+			if !containsSubstring(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want mention of %s", err.Error(), tt.want)
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestConvertAnthropicStreamToOpenAI_UnsupportedNestedDeltaTypesFailExplicitly(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{
+			name:    "nested citations delta",
+			payload: `{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"char_location"}}}`,
+			want:    "citations_delta",
+		},
+		{
+			name:    "nested signature delta",
+			payload: `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}`,
+			want:    "signature_delta",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := convertAnthropicStreamToOpenAI(nil, []byte(tt.payload))
+			if err == nil {
+				t.Fatal("expected explicit error for unsupported nested anthropic delta, got nil")
+			}
+			if !containsSubstring(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want mention of %s", err.Error(), tt.want)
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
 	}
 }
 
@@ -1151,6 +2854,20 @@ func TestConvertOpenAIStreamToResponses_DropsNoChoicesChunkWithoutUsage(t *testi
 	}
 }
 
+func TestConvertOpenAIStreamToResponses_LogprobsFailExplicitly(t *testing.T) {
+	chunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":"hi"},"logprobs":{"content":[{"token":"hi"}]},"finish_reason":null}]}`
+	_, err := convertOpenAIStreamToResponses(&Converter{}, []byte(chunk))
+	if err == nil {
+		t.Fatal("expected explicit error for stream logprobs, got nil")
+	}
+	if !containsSubstring(err.Error(), "logprobs") {
+		t.Fatalf("error = %q, want mention of logprobs", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+	}
+}
+
 func TestConvertOpenAIStreamToAnthropic_PassesThroughNoChoicesChunk(t *testing.T) {
 	chunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[]}`
 	result, err := convertOpenAIStreamToAnthropic(&Converter{}, []byte(chunk))
@@ -1162,6 +2879,20 @@ func TestConvertOpenAIStreamToAnthropic_PassesThroughNoChoicesChunk(t *testing.T
 	}
 	if string(result) != chunk {
 		t.Errorf("pass-through modified the chunk: %s", string(result))
+	}
+}
+
+func TestConvertOpenAIStreamToAnthropic_LogprobsFailExplicitly(t *testing.T) {
+	chunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":"hi"},"logprobs":{"content":[{"token":"hi"}]},"finish_reason":null}]}`
+	_, err := convertOpenAIStreamToAnthropic(&Converter{}, []byte(chunk))
+	if err == nil {
+		t.Fatal("expected explicit error for stream logprobs, got nil")
+	}
+	if !containsSubstring(err.Error(), "logprobs") {
+		t.Fatalf("error = %q, want mention of logprobs", err.Error())
+	}
+	if !containsSubstring(err.Error(), "cannot be converted") {
+		t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
 	}
 }
 
@@ -1274,6 +3005,58 @@ func TestConvertResponsesStreamToOpenAI_FunctionCallLifecycle(t *testing.T) {
 	}
 }
 
+func TestConvertResponsesStreamToOpenAI_RefusalLifecycle(t *testing.T) {
+	c := &Converter{}
+	var chunks []map[string]any
+	events := []string{
+		`{"type":"response.refusal.delta","delta":"I can't","output_index":0,"content_index":0}`,
+		`{"type":"response.refusal.done","refusal":"I can't assist with that.","output_index":0,"content_index":0}`,
+		`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"content_filter"}}}`,
+	}
+	for i, event := range events {
+		result, err := convertResponsesStreamToOpenAI(c, []byte(event))
+		if err != nil {
+			t.Fatalf("event%d: unexpected error: %v", i+1, err)
+		}
+		appendJSONLineEvents(t, &chunks, fmt.Sprintf("event%d", i+1), result)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected refusal chunk and terminal chunk, got %d: %s", len(chunks), mustMarshal(chunks))
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected exactly one refusal chunk plus one terminal chunk, got %d: %s", len(chunks), mustMarshal(chunks))
+	}
+	refusalDelta := chunks[0]["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
+	if refusalDelta["refusal"] != "I can't" {
+		t.Fatalf("delta = %v, want refusal text", refusalDelta)
+	}
+	if _, ok := chunks[1]["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["refusal"]; ok {
+		t.Fatalf("terminal chunk must not repeat refusal payload after refusal.delta: %s", mustMarshal(chunks[1]))
+	}
+	finishReason := chunks[len(chunks)-1]["choices"].([]any)[0].(map[string]any)["finish_reason"]
+	if finishReason != "content_filter" {
+		t.Fatalf("finish_reason = %v, want content_filter", finishReason)
+	}
+}
+
+func TestConvertResponsesStreamToOpenAI_RefusalDoneWithoutDelta(t *testing.T) {
+	result, err := convertResponsesStreamToOpenAI(&Converter{}, []byte(`{"type":"response.refusal.done","refusal":"I can't assist with that.","output_index":0,"content_index":0}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected refusal chunk from refusal.done event")
+	}
+	var chunk map[string]any
+	if err := json.Unmarshal(result, &chunk); err != nil {
+		t.Fatalf("failed to unmarshal refusal chunk: %v", err)
+	}
+	delta := chunk["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
+	if delta["refusal"] != "I can't assist with that." {
+		t.Fatalf("delta = %v, want full refusal text", delta)
+	}
+}
+
 func TestConvertResponsesResponseToOpenAI_IncompleteUsesLength(t *testing.T) {
 	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}]}`
 	body, err := convertResponsesResponseToOpenAI([]byte(input))
@@ -1303,6 +3086,34 @@ func TestConvertResponsesResponseToOpenAI_IncompleteUsesContentFilter(t *testing
 	finishReason := resp["choices"].([]any)[0].(map[string]any)["finish_reason"]
 	if finishReason != "content_filter" {
 		t.Fatalf("finish_reason = %v, want content_filter", finishReason)
+	}
+}
+
+func TestConvertResponsesResponseToOpenAI_UnsupportedStatusFailsExplicitly(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "queued", status: "queued"},
+		{name: "in_progress", status: "in_progress"},
+		{name: "failed", status: "failed"},
+		{name: "cancelled", status: "cancelled"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := fmt.Sprintf(`{"id":"resp_123","object":"response","model":"gpt-4","status":%q,"output":[]}`, tt.status)
+			_, err := convertResponsesResponseToOpenAI([]byte(input))
+			if err == nil {
+				t.Fatalf("expected explicit error for status %s, got nil", tt.status)
+			}
+			if !containsSubstring(err.Error(), "status") {
+				t.Fatalf("error = %q, want mention of status", err.Error())
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
 	}
 }
 
@@ -1783,6 +3594,25 @@ func TestUnsupportedContentTypeOpenAIToAnthropic(t *testing.T) {
 	}
 }
 
+func TestOpenAINonPortableContentFailsExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"c29tZS1hdWRpby1kYXRh","format":"wav"}}]}]}`
+	_, err := openAIToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for OpenAI non-portable content, got nil")
+	}
+	if !containsSubstring(err.Error(), "openai non-portable content block") {
+		t.Fatalf("responses error = %q, want explicit non-portable content message", err.Error())
+	}
+
+	_, err = openAIToAnthropicRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for OpenAI non-portable content via anthropic conversion, got nil")
+	}
+	if !containsSubstring(err.Error(), "openai non-portable content block") {
+		t.Fatalf("anthropic error = %q, want explicit non-portable content message", err.Error())
+	}
+}
+
 func TestUnsupportedContentTypeAnthropicToOpenAI(t *testing.T) {
 	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"audio","data":"..."}]}],"max_tokens":100}`
 	_, err := anthropicToOpenAIRequest([]byte(input))
@@ -1794,6 +3624,25 @@ func TestUnsupportedContentTypeAnthropicToOpenAI(t *testing.T) {
 	}
 }
 
+func TestAnthropicNonPortableContentFailsExplicitly(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":[{"type":"search_result","source":"web","text":"example"}]}],"max_tokens":100}`
+	_, err := anthropicToOpenAIRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for Anthropic non-portable content block, got nil")
+	}
+	if !containsSubstring(err.Error(), "anthropic non-portable content block") {
+		t.Fatalf("openai error = %q, want explicit non-portable content message", err.Error())
+	}
+
+	_, err = anthropicToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for Anthropic non-portable content block via responses bridge, got nil")
+	}
+	if !containsSubstring(err.Error(), "anthropic non-portable content block") {
+		t.Fatalf("responses error = %q, want explicit non-portable content message", err.Error())
+	}
+}
+
 func TestUnsupportedContentTypeOpenAIToResponses(t *testing.T) {
 	input := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"video_file","url":"..."}]}]}`
 	_, err := openAIToResponsesRequest([]byte(input))
@@ -1802,6 +3651,163 @@ func TestUnsupportedContentTypeOpenAIToResponses(t *testing.T) {
 	}
 	if !containsSubstring(err.Error(), "unsupported") {
 		t.Errorf("error = %q, want mention of unsupported", err.Error())
+	}
+}
+
+func TestMalformedResponsesInputImageFailsExplicitly(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "missing image payload",
+			input: `{"model":"gpt-4","input":[{"type":"message","role":"user","content":[{"type":"input_image"}]}]}`,
+		},
+		{
+			name:  "empty image_url",
+			input: `{"model":"gpt-4","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":""}]}]}`,
+		},
+		{
+			name:  "non-string image_data",
+			input: `{"model":"gpt-4","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_data":123}]}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := responsesToOpenAIRequest([]byte(tt.input))
+			if err == nil {
+				t.Fatal("expected explicit error for malformed responses input_image, got nil")
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("openai error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+
+			_, err = responsesToAnthropicRequest([]byte(tt.input))
+			if err == nil {
+				t.Fatal("expected explicit error for malformed responses input_image via anthropic bridge, got nil")
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("anthropic error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestMalformedOpenAIImageURLFailsExplicitly(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "missing image_url object",
+			input: `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"image_url"}]}]}`,
+		},
+		{
+			name:  "image_url missing url",
+			input: `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"image_url","image_url":{}}]}]}`,
+		},
+		{
+			name:  "malformed data url",
+			input: `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64"}}]}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := openAIToResponsesRequest([]byte(tt.input))
+			if err == nil {
+				t.Fatal("expected explicit error for malformed openai image_url to responses, got nil")
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("responses error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+
+			inputAnthropic := strings.TrimSuffix(tt.input, "}") + `,"max_completion_tokens":64}`
+			_, err = openAIToAnthropicRequest([]byte(inputAnthropic))
+			if err == nil {
+				t.Fatal("expected explicit error for malformed openai image_url to anthropic, got nil")
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("anthropic error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestMalformedAnthropicImageSourceFailsExplicitly(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "missing source",
+			input: `{"model":"claude-3","max_tokens":100,"messages":[{"role":"user","content":[{"type":"image"}]}]}`,
+		},
+		{
+			name:  "unsupported source type",
+			input: `{"model":"claude-3","max_tokens":100,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"file_id","id":"f_1"}}]}]}`,
+		},
+		{
+			name:  "empty url source",
+			input: `{"model":"claude-3","max_tokens":100,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":""}}]}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := anthropicToOpenAIRequest([]byte(tt.input))
+			if err == nil {
+				t.Fatal("expected explicit error for malformed anthropic image source to openai, got nil")
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("openai error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+
+			_, err = anthropicToResponsesRequest([]byte(tt.input))
+			if err == nil {
+				t.Fatal("expected explicit error for malformed anthropic image source to responses, got nil")
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("responses error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
+	}
+}
+
+func TestMalformedAnthropicAssistantImageSourceFailsExplicitly(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "assistant unsupported source type",
+			input: `{"model":"claude-3","max_tokens":100,"messages":[{"role":"assistant","content":[{"type":"image","source":{"type":"file_id","id":"f_1"}}]}]}`,
+		},
+		{
+			name:  "assistant missing source",
+			input: `{"model":"claude-3","max_tokens":100,"messages":[{"role":"assistant","content":[{"type":"image"}]}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := anthropicToOpenAIRequest([]byte(tt.input))
+			if err == nil {
+				t.Fatal("expected explicit error for malformed anthropic assistant image source to openai, got nil")
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("openai error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+
+			_, err = anthropicToResponsesRequest([]byte(tt.input))
+			if err == nil {
+				t.Fatal("expected explicit error for malformed anthropic assistant image source to responses, got nil")
+			}
+			if !containsSubstring(err.Error(), "cannot be converted") {
+				t.Fatalf("responses error = %q, want explicit cannot-be-converted policy", err.Error())
+			}
+		})
 	}
 }
 
@@ -1824,6 +3830,55 @@ func TestMalformedToolMissingFunction(t *testing.T) {
 	}
 	if !containsSubstring(err.Error(), "non-object function") {
 		t.Errorf("error = %q, want mention of non-object function", err.Error())
+	}
+}
+
+func TestResponsesHostedToolsFailExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","input":"search","tools":[{"type":"web_search"}]}`
+	_, err := responsesToOpenAIRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for Responses hosted tool, got nil")
+	}
+	if !containsSubstring(err.Error(), "responses-native tool") {
+		t.Fatalf("error = %q, want explicit Responses-native tool message", err.Error())
+	}
+
+	_, err = responsesToAnthropicRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for Responses hosted tool via anthropic bridge, got nil")
+	}
+	if !containsSubstring(err.Error(), "responses-native tool") {
+		t.Fatalf("bridge error = %q, want explicit Responses-native tool message", err.Error())
+	}
+}
+
+func TestAnthropicBuiltInToolsFailExplicitly(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":"test"}],"max_tokens":100,"tools":[{"type":"web_search_20250305"}]}`
+	_, err := anthropicToOpenAIRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for Anthropic built-in tool, got nil")
+	}
+	if !containsSubstring(err.Error(), "anthropic built-in tool") {
+		t.Fatalf("error = %q, want explicit built-in tool message", err.Error())
+	}
+}
+
+func TestOpenAINonPortableToolsFailExplicitly(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"tools":[{"type":"custom","name":"grammar_tool","format":{"type":"grammar","syntax":"lark","definition":"start: WORD"}}]}`
+	_, err := openAIToResponsesRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for OpenAI non-portable tool, got nil")
+	}
+	if !containsSubstring(err.Error(), "openai non-portable tool") {
+		t.Fatalf("responses error = %q, want explicit OpenAI non-portable tool message", err.Error())
+	}
+
+	_, err = openAIToAnthropicRequest([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for OpenAI non-portable tool via anthropic conversion, got nil")
+	}
+	if !containsSubstring(err.Error(), "openai non-portable tool") {
+		t.Fatalf("anthropic error = %q, want explicit OpenAI non-portable tool message", err.Error())
 	}
 }
 
@@ -2463,4 +4518,13 @@ func countEvents(events []map[string]any, eventType string) int {
 		}
 	}
 	return count
+}
+
+func mustUnmarshalMap(t *testing.T, input string) map[string]any {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal([]byte(input), &out); err != nil {
+		t.Fatalf("failed to unmarshal fixture: %v", err)
+	}
+	return out
 }
