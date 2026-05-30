@@ -298,15 +298,6 @@ func New(proxyConfig config.Config) *ProxyManager {
 	return pm
 }
 
-func isRerankPath(path string) bool {
-	switch path {
-	case "/reranking", "/rerank", "/v1/rerank", "/v1/reranking":
-		return true
-	default:
-		return false
-	}
-}
-
 func (pm *ProxyManager) setupGinEngine() {
 
 	pm.ginEngine.Use(func(c *gin.Context) {

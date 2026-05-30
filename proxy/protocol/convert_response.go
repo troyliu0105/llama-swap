@@ -117,7 +117,7 @@ func convertResponsesResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 	out["model"] = resp["model"]
 
 	var choices []any
-	finishReason := "stop"
+	finishReason := responsesStatusToOpenAIFinishReason(resp)
 	messageContent := ""
 	var toolCalls []any
 
@@ -247,14 +247,7 @@ func convertOpenAIResponseMapToAnthropic(resp map[string]any) (map[string]any, e
 
 			// Map finish_reason
 			if fr, ok := choice["finish_reason"].(string); ok {
-				switch fr {
-				case "stop":
-					stopReason = "end_turn"
-				case "length":
-					stopReason = "max_tokens"
-				case "tool_calls":
-					stopReason = "tool_use"
-				}
+				stopReason = openAIFinishReasonToAnthropicStopReason(fr)
 			}
 		}
 	}
@@ -341,16 +334,7 @@ func convertAnthropicResponseMapToOpenAI(resp map[string]any) (map[string]any, e
 
 	// Map stop_reason
 	if sr, ok := resp["stop_reason"].(string); ok {
-		switch sr {
-		case "end_turn":
-			finishReason = "stop"
-		case "max_tokens":
-			finishReason = "length"
-		case "tool_use":
-			finishReason = "tool_calls"
-		case "stop_sequence":
-			finishReason = "stop"
-		}
+		finishReason = anthropicStopReasonToOpenAIFinishReason(sr)
 	}
 
 	out["choices"] = []any{
@@ -549,4 +533,43 @@ func toInt(v any) int64 {
 	default:
 		return 0
 	}
+}
+
+func openAIFinishReasonToAnthropicStopReason(reason string) string {
+	switch reason {
+	case "length":
+		return "max_tokens"
+	case "tool_calls", "function_call":
+		return "tool_use"
+	default:
+		return "end_turn"
+	}
+}
+
+func anthropicStopReasonToOpenAIFinishReason(reason string) string {
+	switch reason {
+	case "max_tokens":
+		return "length"
+	case "tool_use":
+		return "tool_calls"
+	default:
+		return "stop"
+	}
+}
+
+func responsesStatusToOpenAIFinishReason(resp map[string]any) string {
+	status, _ := resp["status"].(string)
+	if status == "incomplete" {
+		if details, ok := resp["incomplete_details"].(map[string]any); ok {
+			reason, _ := details["reason"].(string)
+			switch reason {
+			case "max_output_tokens", "max_tokens":
+				return "length"
+			case "content_filter":
+				return "content_filter"
+			}
+		}
+		return "length"
+	}
+	return "stop"
 }

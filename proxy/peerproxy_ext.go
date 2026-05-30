@@ -181,8 +181,7 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 		}
 		disablePeerHTTP2(peerTransport)
 
-		reverseProxy := httputil.NewSingleHostReverseProxy(peer.ProxyURL)
-		reverseProxy.Transport = peerTransport
+		reverseProxy := &httputil.ReverseProxy{Transport: peerTransport}
 
 		pp := &enhancedPeerMember{
 			peerID:          peerID,
@@ -240,25 +239,26 @@ func NewEnhancedPeerProxy(peers config.PeerDictionaryExtConfig, prefixPeerModels
 			pp.codexProxy = codexProxy
 		}
 
-		originalDirector := reverseProxy.Director
-		reverseProxy.Director = func(req *http.Request) {
-			originalDirector(req)
-			req.Host = req.URL.Host
+		reverseProxy.Rewrite = func(pr *httputil.ProxyRequest) {
+			pr.SetURL(peer.ProxyURL)
+			pr.SetXForwarded()
+			pr.Out.Host = pr.Out.URL.Host
 		}
 
 		if pp.codexProxy != nil {
-			reverseProxy.Director = func(req *http.Request) {
-				req.Host = req.URL.Host
+			reverseProxy.Rewrite = func(pr *httputil.ProxyRequest) {
+				pr.SetURL(peer.ProxyURL)
+				pr.Out.Host = pr.Out.URL.Host
 				// Strip forwarding headers that ReverseProxy would otherwise add.
 				// httputil.ReverseProxy automatically injects X-Forwarded-For,
 				// which would leak the client IP to chatgpt.com.
-				req.Header["X-Forwarded-For"] = nil
-				req.Header["X-Forwarded-Host"] = nil
-				req.Header.Del("X-Forwarded-Proto")
-				req.Header.Del("X-Forwarded-Server")
-				req.Header.Del("X-Real-IP")
-				req.Header.Del("Forwarded")
-				req.Header.Del("Via")
+				pr.Out.Header["X-Forwarded-For"] = nil
+				pr.Out.Header["X-Forwarded-Host"] = nil
+				pr.Out.Header.Del("X-Forwarded-Proto")
+				pr.Out.Header.Del("X-Forwarded-Server")
+				pr.Out.Header.Del("X-Real-IP")
+				pr.Out.Header.Del("Forwarded")
+				pr.Out.Header.Del("Via")
 			}
 		}
 

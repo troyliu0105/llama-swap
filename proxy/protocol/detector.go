@@ -12,6 +12,10 @@ func DetectClientFormat(path string) Format {
 		p = p[2:]
 	}
 
+	if strings.HasSuffix(p, "/messages/count_tokens") {
+		return FormatUnknown
+	}
+
 	switch {
 	case strings.HasSuffix(p, "/chat/completions"):
 		return FormatOpenAI
@@ -27,6 +31,10 @@ func DetectClientFormat(path string) Format {
 // RewritePath changes the endpoint path from one format to another.
 // It preserves any path prefix before the protocol endpoint.
 func RewritePath(originalPath string, targetFormat Format) string {
+	if strings.HasSuffix(originalPath, "/messages/count_tokens") {
+		return originalPath
+	}
+
 	var targetSuffix string
 	switch targetFormat {
 	case FormatOpenAI:

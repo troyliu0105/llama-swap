@@ -19,6 +19,10 @@ func NewConverter(from, to Format) (*Converter, error) {
 // ConvertRequest transforms a request body from the client format to the upstream format.
 // Returns the new request body bytes and the target path.
 func (c *Converter) ConvertRequest(body []byte, requestPath string) (newBody []byte, newPath string, err error) {
+	if c.From == FormatOpenAI {
+		c.openAIIncludeUsage = detectOpenAIStreamIncludeUsage(body)
+	}
+
 	convertFn, ok := requestConverters[convertKey{c.From, c.To}]
 	if !ok {
 		return nil, "", fmt.Errorf("unsupported request conversion: %s → %s", c.From, c.To)

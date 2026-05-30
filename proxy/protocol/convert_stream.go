@@ -24,13 +24,24 @@ import (
 
 func convertOpenAIStreamToResponses(c *Converter, data []byte) ([]byte, error) {
 	if string(data) == "[DONE]" {
-		return json.Marshal(map[string]any{
-			"type":            "response.completed",
-			"sequence_number": 0,
-			"response": map[string]any{
-				"status": "completed",
-			},
-		})
+		if c.responseCompleted {
+			return nil, nil
+		}
+		if !c.responseAwaitingCompletion {
+			b, _ := json.Marshal(map[string]any{
+				"type":            "response.completed",
+				"sequence_number": 0,
+				"response": map[string]any{
+					"status": "completed",
+				},
+			})
+			c.responseCompleted = true
+			return b, nil
+		}
+		events := responsesCompletionEventsJSON(c, nil, nil)
+		c.responseCompleted = true
+		c.responseAwaitingCompletion = false
+		return []byte(strings.Join(events, "\n")), nil
 	}
 
 	var chunk map[string]any
@@ -41,18 +52,15 @@ func convertOpenAIStreamToResponses(c *Converter, data []byte) ([]byte, error) {
 	choices, _ := chunk["choices"].([]any)
 	if len(choices) == 0 {
 		if usage, ok := chunk["usage"].(map[string]any); ok && usage != nil {
-			return json.Marshal(map[string]any{
-				"type":            "response.completed",
-				"sequence_number": 0,
-				"response": map[string]any{
-					"id":     prefixID(chunk["id"], "resp_"),
-					"status": "completed",
-					"model":  chunk["model"],
-					"usage":  convertOpenAIUsageToResponses(usage),
-				},
-			})
+			if c.responseCompleted {
+				return nil, nil
+			}
+			events := responsesCompletionEventsJSON(c, chunk, usage)
+			c.responseCompleted = true
+			c.responseAwaitingCompletion = false
+			return []byte(strings.Join(events, "\n")), nil
 		}
-		return data, nil
+		return nil, nil
 	}
 
 	choice, _ := choices[0].(map[string]any)
@@ -98,7 +106,7 @@ func convertOpenAIStreamToResponses(c *Converter, data []byte) ([]byte, error) {
 	if hasReasoning {
 		reasoningStr, _ := reasoningContent.(string)
 		b, _ := json.Marshal(map[string]any{
-			"type":            "response.output_text.delta",
+			"type":            "response.reasoning_text.delta",
 			"sequence_number": 0,
 			"output_index":    0,
 			"content_index":   0,
@@ -120,7 +128,12 @@ func convertOpenAIStreamToResponses(c *Converter, data []byte) ([]byte, error) {
 	}
 
 	if hasToolCalls {
-		// Convert tool call deltas
+		if c.responseToolIndexes == nil {
+			c.responseToolIndexes = make(map[int]int)
+		}
+		if c.toolCallBuffers == nil {
+			c.toolCallBuffers = make(map[int]*toolCallBuf)
+		}
 		toolCallDeltas, _ := delta["tool_calls"].([]any)
 		for _, tcd := range toolCallDeltas {
 			tcMap, ok := tcd.(map[string]any)
@@ -131,20 +144,64 @@ func convertOpenAIStreamToResponses(c *Converter, data []byte) ([]byte, error) {
 			if fn == nil {
 				continue
 			}
+			openAIIndex := int(toInt(tcMap["index"]))
+			buf, ok := c.toolCallBuffers[openAIIndex]
+			if !ok {
+				buf = &toolCallBuf{}
+				buf.outputIndex = len(c.responseToolIndexes) + 1
+				c.responseToolIndexes[openAIIndex] = buf.outputIndex
+				c.toolCallBuffers[openAIIndex] = buf
+			}
+			if buf.id == "" {
+				if id, _ := tcMap["id"].(string); id != "" {
+					buf.id = id
+				} else {
+					buf.id = fmt.Sprintf("call_protocol_%d", openAIIndex)
+				}
+			}
+			if buf.name == "" {
+				if name, _ := fn["name"].(string); name != "" {
+					buf.name = name
+				}
+			}
+			if buf.args.Len() == 0 {
+				b, _ := json.Marshal(map[string]any{
+					"type":            "response.output_item.added",
+					"sequence_number": 0,
+					"output_index":    buf.outputIndex,
+					"item": map[string]any{
+						"type":      "function_call",
+						"id":        buf.id,
+						"call_id":   buf.id,
+						"name":      buf.name,
+						"arguments": "",
+					},
+				})
+				result = append(result, string(b))
+			}
 			argsDelta, _ := fn["arguments"].(string)
+			buf.args.WriteString(argsDelta)
 			b, _ := json.Marshal(map[string]any{
 				"type":            "response.function_call_arguments.delta",
 				"sequence_number": 0,
-				"output_index":    0,
-				"call_id":         tcMap["id"],
+				"output_index":    buf.outputIndex,
+				"call_id":         buf.id,
 				"delta":           argsDelta,
 			})
 			result = append(result, string(b))
+			c.responseSawToolCall = true
 		}
 	}
 
 	if finishReason != "" {
-		result = append(result, responsesEndEventsJSON(chunk, chunkUsage)...)
+		result = append(result, responsesDoneEventsJSON(c)...)
+		c.responseAwaitingCompletion = true
+		c.responsePendingTerminal = finishReason
+		if chunkUsage != nil {
+			result = append(result, responsesCompletionEventsJSON(c, chunk, chunkUsage)...)
+			c.responseCompleted = true
+			c.responseAwaitingCompletion = false
+		}
 	}
 
 	if len(result) == 0 {
@@ -258,13 +315,176 @@ func responsesEndEventsJSON(chunk map[string]any, usage map[string]any) []string
 	return events
 }
 
+func responsesDoneEventsJSON(c *Converter) []string {
+	var events []string
+	if c.streamStarted && !c.responseMessageDone {
+		contentDone, _ := json.Marshal(map[string]any{
+			"type":            "response.content_part.done",
+			"sequence_number": 0,
+			"output_index":    0,
+			"content_index":   0,
+			"part": map[string]any{
+				"type": "output_text",
+				"text": "",
+			},
+		})
+		itemDone, _ := json.Marshal(map[string]any{
+			"type":            "response.output_item.done",
+			"sequence_number": 0,
+			"output_index":    0,
+			"item": map[string]any{
+				"type":    "message",
+				"role":    "assistant",
+				"content": []any{},
+			},
+		})
+		events = append(events, string(contentDone), string(itemDone))
+		c.responseMessageDone = true
+	}
+	if len(c.toolCallBuffers) == 0 {
+		return events
+	}
+	indices := make([]int, 0, len(c.toolCallBuffers))
+	for index := range c.toolCallBuffers {
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+	for _, index := range indices {
+		buf := c.toolCallBuffers[index]
+		args := buf.args.String()
+		argsDone, _ := json.Marshal(map[string]any{
+			"type":            "response.function_call_arguments.done",
+			"sequence_number": 0,
+			"output_index":    buf.outputIndex,
+			"call_id":         buf.id,
+			"arguments":       args,
+		})
+		itemDone, _ := json.Marshal(map[string]any{
+			"type":            "response.output_item.done",
+			"sequence_number": 0,
+			"output_index":    buf.outputIndex,
+			"item": map[string]any{
+				"type":      "function_call",
+				"id":        buf.id,
+				"call_id":   buf.id,
+				"name":      buf.name,
+				"arguments": args,
+			},
+		})
+		events = append(events, string(argsDone), string(itemDone))
+	}
+	c.toolCallBuffers = nil
+	return events
+}
+
+func responsesCompletionEventsJSON(c *Converter, chunk map[string]any, usage map[string]any) []string {
+	eventType := "response.completed"
+	status := "completed"
+	response := map[string]any{
+		"status": status,
+	}
+	if chunk != nil {
+		if chunk["id"] != nil {
+			response["id"] = prefixID(chunk["id"], "resp_")
+		}
+		if chunk["model"] != nil {
+			response["model"] = chunk["model"]
+		}
+	}
+	if c.responsePendingTerminal == "length" || c.responsePendingTerminal == "content_filter" {
+		eventType = "response.incomplete"
+		response["status"] = "incomplete"
+		reason := "max_output_tokens"
+		if c.responsePendingTerminal == "content_filter" {
+			reason = "content_filter"
+		}
+		response["incomplete_details"] = map[string]any{"reason": reason}
+	}
+	if usage != nil {
+		response["usage"] = convertOpenAIUsageToResponses(usage)
+	}
+	b, _ := json.Marshal(map[string]any{
+		"type":            eventType,
+		"sequence_number": 0,
+		"response":        response,
+	})
+	return []string{string(b)}
+}
+
+func ensureResponseToolCallBuffer(c *Converter, outputIndex int) *toolCallBuf {
+	if c.toolCallBuffers == nil {
+		c.toolCallBuffers = make(map[int]*toolCallBuf)
+	}
+	buf, ok := c.toolCallBuffers[outputIndex]
+	if !ok {
+		buf = &toolCallBuf{outputIndex: outputIndex}
+		c.toolCallBuffers[outputIndex] = buf
+	}
+	return buf
+}
+
+func marshalOpenAIToolCallChunk(index int, callID, name, arguments string) ([]byte, error) {
+	toolCall := map[string]any{
+		"index": index,
+		"type":  "function",
+		"function": map[string]any{
+			"arguments": arguments,
+		},
+	}
+	if callID != "" {
+		toolCall["id"] = callID
+	}
+	if name != "" {
+		toolCall["function"].(map[string]any)["name"] = name
+	}
+	return json.Marshal(map[string]any{
+		"id":      "chatcmpl-protocol",
+		"object":  "chat.completion.chunk",
+		"created": time.Now().Unix(),
+		"choices": []any{
+			map[string]any{
+				"index": 0,
+				"delta": map[string]any{
+					"tool_calls": []any{toolCall},
+				},
+				"finish_reason": nil,
+			},
+		},
+	})
+}
+
+func responsesStreamFinishReason(c *Converter, evtType string, evt map[string]any) string {
+	if c.responseSawToolCall {
+		return "tool_calls"
+	}
+	if evtType == "response.incomplete" {
+		response, _ := evt["response"].(map[string]any)
+		if response != nil {
+			if details, ok := response["incomplete_details"].(map[string]any); ok {
+				reason, _ := details["reason"].(string)
+				switch reason {
+				case "content_filter":
+					return "content_filter"
+				case "max_output_tokens", "max_tokens":
+					return "length"
+				}
+			}
+		}
+		return "length"
+	}
+	return "stop"
+}
+
 // ---------------------------------------------------------------------------
 // Responses stream → OpenAI stream
 //
 // Converts individual response events into chat.completion.chunk objects.
 // ---------------------------------------------------------------------------
 
-func convertResponsesStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
+func convertResponsesStreamToOpenAI(c *Converter, data []byte) ([]byte, error) {
+	if c == nil {
+		c = &Converter{}
+	}
 	var evt map[string]any
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return data, nil
@@ -273,6 +493,26 @@ func convertResponsesStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 	evtType, _ := evt["type"].(string)
 
 	switch evtType {
+	case "response.output_item.added":
+		item, _ := evt["item"].(map[string]any)
+		if item == nil || item["type"] != "function_call" {
+			return nil, nil
+		}
+		buf := ensureResponseToolCallBuffer(c, int(toInt(evt["output_index"])))
+		if callID, _ := item["call_id"].(string); callID != "" {
+			buf.id = callID
+		} else if id, _ := item["id"].(string); id != "" {
+			buf.id = id
+		}
+		if name, _ := item["name"].(string); name != "" {
+			buf.name = name
+		}
+		if args, _ := item["arguments"].(string); args != "" {
+			buf.args.WriteString(args)
+		}
+		c.responseSawToolCall = true
+		return marshalOpenAIToolCallChunk(buf.outputIndex, buf.id, buf.name, buf.args.String())
+
 	case "response.output_text.delta":
 		delta, _ := evt["delta"].(string)
 		return json.Marshal(map[string]any{
@@ -290,13 +530,8 @@ func convertResponsesStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 			},
 		})
 
-	case "response.output_text.done":
-		// Ignore, we already sent the deltas
-		return nil, nil
-
-	case "response.function_call_arguments.delta":
-		argsDelta, _ := evt["delta"].(string)
-		callID, _ := evt["call_id"].(string)
+	case "response.reasoning_text.delta":
+		delta, _ := evt["delta"].(string)
 		return json.Marshal(map[string]any{
 			"id":      "chatcmpl-protocol",
 			"object":  "chat.completion.chunk",
@@ -305,30 +540,46 @@ func convertResponsesStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 				map[string]any{
 					"index": 0,
 					"delta": map[string]any{
-						"tool_calls": []any{
-							map[string]any{
-								"index": 0,
-								"id":    callID,
-								"function": map[string]any{
-									"arguments": argsDelta,
-								},
-								"type": "function",
-							},
-						},
+						"reasoning_content": delta,
 					},
 					"finish_reason": nil,
 				},
 			},
 		})
 
+	case "response.output_text.done":
+		// Ignore, we already sent the deltas
+		return nil, nil
+
+	case "response.function_call_arguments.delta":
+		argsDelta, _ := evt["delta"].(string)
+		buf := ensureResponseToolCallBuffer(c, int(toInt(evt["output_index"])))
+		if callID, _ := evt["call_id"].(string); callID != "" {
+			buf.id = callID
+		}
+		buf.args.WriteString(argsDelta)
+		c.responseSawToolCall = true
+		return marshalOpenAIToolCallChunk(buf.outputIndex, buf.id, buf.name, argsDelta)
+
 	case "response.function_call_arguments.done":
 		return nil, nil
 
-	case "response.completed", "response.incomplete":
-		finishReason := "stop"
-		if evtType == "response.incomplete" {
-			finishReason = "length"
+	case "response.output_item.done":
+		item, _ := evt["item"].(map[string]any)
+		if item != nil && item["type"] == "function_call" {
+			buf := ensureResponseToolCallBuffer(c, int(toInt(evt["output_index"])))
+			if callID, _ := item["call_id"].(string); callID != "" {
+				buf.id = callID
+			}
+			if name, _ := item["name"].(string); name != "" {
+				buf.name = name
+			}
+			c.responseSawToolCall = true
 		}
+		return nil, nil
+
+	case "response.completed", "response.incomplete":
+		finishReason := responsesStreamFinishReason(c, evtType, evt)
 		finalChunk := map[string]any{
 			"id":      "chatcmpl-protocol",
 			"object":  "chat.completion.chunk",
@@ -347,7 +598,7 @@ func convertResponsesStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 		}
 		copyFields(finalChunk, response, "model")
 		usage, _ := response["usage"].(map[string]any)
-		if usage == nil {
+		if usage == nil || (!c.openAIIncludeUsage && c.To == FormatOpenAI) {
 			return json.Marshal(finalChunk)
 		}
 		usageChunk := map[string]any{
@@ -363,16 +614,14 @@ func convertResponsesStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 		return []byte(string(finalBytes) + "\n" + string(usageBytes)), nil
 
 	case "response.created", "response.in_progress", "response.queued",
-		"response.output_item.added", "response.output_item.done",
 		"response.content_part.added", "response.content_part.done",
 		"response.refusal.delta", "response.refusal.done",
-		"response.reasoning_text.delta", "response.reasoning_text.done":
+		"response.reasoning_text.done":
 		// These events don't have direct OpenAI equivalents, skip them
 		return nil, nil
 
 	default:
-		// Pass through unknown events
-		return data, nil
+		return nil, nil
 	}
 }
 
@@ -388,7 +637,10 @@ func convertResponsesStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 //   data: {"type":"message_stop"}
 // ---------------------------------------------------------------------------
 
-func convertAnthropicStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
+func convertAnthropicStreamToOpenAI(c *Converter, data []byte) ([]byte, error) {
+	if c == nil {
+		c = &Converter{}
+	}
 	var evt map[string]any
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return data, nil
@@ -448,8 +700,21 @@ func convertAnthropicStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 			})
 
 		case "thinking_delta":
-			// No OpenAI equivalent, skip
-			return nil, nil
+			thinking, _ := delta["thinking"].(string)
+			return json.Marshal(map[string]any{
+				"id":      "chatcmpl-protocol",
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"choices": []any{
+					map[string]any{
+						"index": 0,
+						"delta": map[string]any{
+							"reasoning_content": thinking,
+						},
+						"finish_reason": nil,
+					},
+				},
+			})
 		}
 
 	case "message_delta":
@@ -480,7 +745,7 @@ func convertAnthropicStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 			},
 		}
 		usage, _ := evt["usage"].(map[string]any)
-		if usage == nil {
+		if usage == nil || (!c.openAIIncludeUsage && c.To == FormatOpenAI) {
 			return json.Marshal(finalChunk)
 		}
 		usageChunk := map[string]any{
@@ -556,7 +821,7 @@ func convertAnthropicStreamToOpenAI(_ *Converter, data []byte) ([]byte, error) {
 		return nil, nil
 
 	default:
-		return data, nil
+		return nil, nil
 	}
 
 	return nil, nil

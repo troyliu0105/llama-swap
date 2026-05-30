@@ -13,6 +13,36 @@ Reference for the Anthropic `/v1/messages` endpoint. This is Anthropic's native 
 
 The API is stateless. The full conversation history must be sent with every request.
 
+## Conversion Support in llama-swap
+
+When a peer model is configured with `upstreamFormat`, llama-swap can convert Anthropic Messages traffic to and from OpenAI Chat Completions and OpenAI Responses.
+
+### Status
+
+| Conversion area | Status | Notes |
+|---|---|---|
+| Messages → Chat Completions request | Partial | Covers top-level `system`, user/assistant turns, tool results, custom tools, tool choice, and common controls. Anthropic-only built-in tool families are not translated into Chat Completions tools. |
+| Messages ← Chat Completions response | Partial | Covers text, tool calls, usage, and stop-reason mapping. Chat-only long-tail metadata does not map cleanly into Messages. |
+| Messages ↔ Chat Completions streaming | Partial | Supports text, thinking/reasoning, tool calls, stop reasons, and usage handling on the common stream paths. Unknown extension events are dropped. |
+| Messages → Responses request | Partial | Implemented through the Chat Completions bridge. Core text/tool conversations work, but Responses-native hosted tools and richer output features are not synthesized. |
+| Messages ← Responses response | Partial | Implemented through the Chat Completions bridge. Common assistant text/tool/usage paths are supported. |
+| Messages ↔ Responses streaming | Partial | Supports text, thinking/reasoning, tool calls, stop reasons, and usage for the common event shapes. Not every semantic event is lossless across the bridge. |
+
+### Supported Well
+
+- Standard `system` + `messages` conversational flows
+- Custom tool definitions with `name` and `input_schema`
+- Tool-use / tool-result round trips on the common paths
+- Streamed text, thinking, and tool-call argument deltas on supported paths
+- Common stop-reason and usage conversions
+
+### Known Gaps
+
+- Anthropic-provided built-in tool families are not converted into Chat Completions or Responses equivalents.
+- Some Anthropic content block types and extension fields do not have exact equivalents in the OpenAI protocols.
+- Multimodal coverage is incomplete across conversions; unsupported block families may fail conversion instead of degrading.
+- `/v1/messages/count_tokens` is intentionally not treated as normal Messages conversion traffic.
+
 ## Authentication
 
 Requests must include these headers:

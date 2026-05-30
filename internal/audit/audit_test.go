@@ -867,7 +867,6 @@ func TestAuditStore_ConcurrentWrites(t *testing.T) {
 	store.retentionDays = 365 // far future so nothing gets deleted
 	store.capturePurgeDays = 365
 
-	const writers = 6
 	const iterations = 50
 
 	var wg sync.WaitGroup

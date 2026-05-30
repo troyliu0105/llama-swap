@@ -588,6 +588,47 @@ func TestAnthropicToOpenAITools(t *testing.T) {
 	}
 }
 
+func TestAnthropicToOpenAITools_AcceptsStandardToolWithoutType(t *testing.T) {
+	input := `{"model":"claude-3","messages":[{"role":"user","content":"test"}],"max_tokens":100,"tools":[{"name":"search","description":"Search","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]}`
+
+	body, err := anthropicToOpenAIRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	tools := req["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	fn := tool["function"].(map[string]any)
+	if tool["type"] != "function" || fn["name"] != "search" {
+		t.Fatalf("converted tool = %v, want OpenAI function search", tool)
+	}
+}
+
+func TestOpenAIToAnthropicTools_EmitsCompatibleSchema(t *testing.T) {
+	input := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"max_completion_tokens":100,"tools":[{"type":"function","function":{"name":"search","description":"Search","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}]}`
+
+	body, err := openAIToAnthropicRequest([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	tools := req["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	if tool["name"] != "search" || tool["input_schema"] == nil {
+		t.Fatalf("converted tool = %v, want Anthropiс-compatible schema", tool)
+	}
+}
+
 func TestOpenAIToAnthropicToolChoice(t *testing.T) {
 	input := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"max_completion_tokens":100,"tool_choice":"required"}`
 
@@ -1001,25 +1042,48 @@ func appendAnthropicStreamEvents(t *testing.T, events *[]map[string]any, label s
 	}
 }
 
+func appendJSONLineEvents(t *testing.T, events *[]map[string]any, label string, data []byte) {
+	t.Helper()
+	if data == nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("%s: failed to unmarshal event %q: %v", label, line, err)
+		}
+		*events = append(*events, event)
+	}
+}
+
+func findEventByType(events []map[string]any, eventType string, predicate func(map[string]any) bool) map[string]any {
+	for _, event := range events {
+		if event["type"] != eventType {
+			continue
+		}
+		if predicate == nil || predicate(event) {
+			return event
+		}
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Hardening regression tests
 // ---------------------------------------------------------------------------
 
-func TestConvertResponsesStreamToOpenAI_PassesThroughUnknownEvent(t *testing.T) {
+func TestConvertResponsesStreamToOpenAI_DropsUnknownEvent(t *testing.T) {
 	unknownEvt := `{"type":"custom.vendor_event","data":"something","sequence_number":42}`
 	result, err := convertResponsesStreamToOpenAI(nil, []byte(unknownEvt))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result == nil {
-		t.Fatal("unknown Responses event was dropped, expected pass-through")
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal(result, &parsed); err != nil {
-		t.Fatalf("pass-through data is not valid JSON: %v", err)
-	}
-	if parsed["type"] != "custom.vendor_event" {
-		t.Errorf("pass-through modified the event: %s", string(result))
+	if result != nil {
+		t.Fatalf("expected unknown Responses event to be dropped, got: %s", string(result))
 	}
 }
 
@@ -1029,13 +1093,11 @@ func TestConvertResponsesStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
 		"response.function_call_arguments.done",
 		"response.created",
 		"response.in_progress",
-		"response.output_item.added",
 		"response.content_part.added",
 		"response.content_part.done",
 		"response.output_item.done",
 		"response.refusal.delta",
 		"response.refusal.done",
-		"response.reasoning_text.delta",
 		"response.reasoning_text.done",
 		"response.queued",
 	} {
@@ -1052,31 +1114,21 @@ func TestConvertResponsesStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
 	}
 }
 
-func TestConvertAnthropicStreamToOpenAI_PassesThroughUnknownEvent(t *testing.T) {
+func TestConvertAnthropicStreamToOpenAI_DropsUnknownEvent(t *testing.T) {
 	unknownEvt := `{"type":"custom_event","data":"payload"}`
 	result, err := convertAnthropicStreamToOpenAI(nil, []byte(unknownEvt))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result == nil {
-		t.Fatal("unknown Anthropic event was dropped, expected pass-through")
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal(result, &parsed); err != nil {
-		t.Fatalf("pass-through data is not valid JSON: %v", err)
-	}
-	if parsed["type"] != "custom_event" {
-		t.Errorf("pass-through modified the event: %s", string(result))
+	if result != nil {
+		t.Fatalf("expected unknown Anthropic event to be dropped, got: %s", string(result))
 	}
 }
 
 func TestConvertAnthropicStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
-	for _, evtType := range []string{"ping", "content_block_stop", "thinking_delta"} {
+	for _, evtType := range []string{"ping", "content_block_stop"} {
 		t.Run(evtType, func(t *testing.T) {
 			evt := `{"type":"` + evtType + `"}`
-			if evtType == "thinking_delta" {
-				evt = `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}`
-			}
 			result, err := convertAnthropicStreamToOpenAI(nil, []byte(evt))
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -1088,17 +1140,14 @@ func TestConvertAnthropicStreamToOpenAI_SkipsKnownNoOps(t *testing.T) {
 	}
 }
 
-func TestConvertOpenAIStreamToResponses_PassesThroughNoChoicesChunk(t *testing.T) {
+func TestConvertOpenAIStreamToResponses_DropsNoChoicesChunkWithoutUsage(t *testing.T) {
 	chunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[]}`
 	result, err := convertOpenAIStreamToResponses(&Converter{}, []byte(chunk))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result == nil {
-		t.Fatal("parseable chunk with empty choices was dropped, expected pass-through")
-	}
-	if string(result) != chunk {
-		t.Errorf("pass-through modified the chunk: %s", string(result))
+	if result != nil {
+		t.Fatalf("expected empty-choices chunk without usage to be dropped, got: %s", string(result))
 	}
 }
 
@@ -1113,6 +1162,210 @@ func TestConvertOpenAIStreamToAnthropic_PassesThroughNoChoicesChunk(t *testing.T
 	}
 	if string(result) != chunk {
 		t.Errorf("pass-through modified the chunk: %s", string(result))
+	}
+}
+
+func TestConvertOpenAIStreamToResponses_ToolCallLifecycle(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatResponses}
+	var events []map[string]any
+
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}`,
+		`[DONE]`,
+	}
+
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToResponses(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendJSONLineEvents(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+
+	if countEvents(events, "response.output_item.added") != 2 {
+		t.Fatalf("expected message and function_call output_item.added events: %s", mustMarshal(events))
+	}
+	toolAdded := findEventByType(events, "response.output_item.added", func(event map[string]any) bool {
+		item, _ := event["item"].(map[string]any)
+		return item["type"] == "function_call"
+	})
+	if toolAdded == nil {
+		t.Fatalf("missing function_call output_item.added: %s", mustMarshal(events))
+	}
+	item := toolAdded["item"].(map[string]any)
+	if item["call_id"] != "call_weather" || item["name"] != "get_weather" {
+		t.Fatalf("tool added item = %s, want call_weather/get_weather", mustMarshal(toolAdded))
+	}
+	if countEvents(events, "response.function_call_arguments.delta") != 2 {
+		t.Fatalf("expected two function_call_arguments.delta events: %s", mustMarshal(events))
+	}
+	if countEvents(events, "response.function_call_arguments.done") != 1 {
+		t.Fatalf("expected one function_call_arguments.done event: %s", mustMarshal(events))
+	}
+	toolDone := findEventByType(events, "response.output_item.done", func(event map[string]any) bool {
+		item, _ := event["item"].(map[string]any)
+		return item["type"] == "function_call"
+	})
+	if toolDone == nil {
+		t.Fatalf("missing function_call output_item.done: %s", mustMarshal(events))
+	}
+	if countEvents(events, "response.completed") != 1 {
+		t.Fatalf("expected exactly one response.completed: %s", mustMarshal(events))
+	}
+}
+
+func TestConvertOpenAIStreamToResponses_TerminalEventsOnlyOnce(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatResponses}
+	var events []map[string]any
+	chunks := []string{
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`,
+		`[DONE]`,
+	}
+	for i, chunk := range chunks {
+		result, err := convertOpenAIStreamToResponses(c, []byte(chunk))
+		if err != nil {
+			t.Fatalf("chunk%d: unexpected error: %v", i+1, err)
+		}
+		appendJSONLineEvents(t, &events, fmt.Sprintf("chunk%d", i+1), result)
+	}
+	if countEvents(events, "response.content_part.done") != 1 || countEvents(events, "response.output_item.done") != 1 || countEvents(events, "response.completed") != 1 {
+		t.Fatalf("expected terminal events once: %s", mustMarshal(events))
+	}
+}
+
+func TestConvertResponsesStreamToOpenAI_FunctionCallLifecycle(t *testing.T) {
+	c := &Converter{From: FormatResponses, To: FormatOpenAI, openAIIncludeUsage: true}
+	var chunks []map[string]any
+	events := []string{
+		`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_weather","name":"get_weather","arguments":""}}`,
+		`{"type":"response.function_call_arguments.delta","output_index":1,"call_id":"call_weather","delta":"{\"city\":"}`,
+		`{"type":"response.function_call_arguments.delta","output_index":1,"call_id":"call_weather","delta":"\"Paris\"}"}`,
+		`{"type":"response.function_call_arguments.done","output_index":1,"call_id":"call_weather","arguments":"{\"city\":\"Paris\"}"}`,
+		`{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_weather","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}`,
+		`{"type":"response.completed","response":{"id":"resp_1","status":"completed","model":"gpt-4","usage":{"input_tokens":10,"output_tokens":2}}}`,
+	}
+	for i, event := range events {
+		result, err := convertResponsesStreamToOpenAI(c, []byte(event))
+		if err != nil {
+			t.Fatalf("event%d: unexpected error: %v", i+1, err)
+		}
+		appendJSONLineEvents(t, &chunks, fmt.Sprintf("event%d", i+1), result)
+	}
+	if len(chunks) < 3 {
+		t.Fatalf("expected multiple OpenAI chunks, got %d: %s", len(chunks), mustMarshal(chunks))
+	}
+	firstToolCall := chunks[0]["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)
+	if firstToolCall["id"] != "call_weather" {
+		t.Fatalf("first tool call id = %v, want call_weather: %s", firstToolCall["id"], mustMarshal(chunks[0]))
+	}
+	fn := firstToolCall["function"].(map[string]any)
+	if fn["name"] != "get_weather" {
+		t.Fatalf("first tool call name = %v, want get_weather: %s", fn["name"], mustMarshal(chunks[0]))
+	}
+	finalChunk := chunks[len(chunks)-2]
+	finishReason := finalChunk["choices"].([]any)[0].(map[string]any)["finish_reason"]
+	if finishReason != "tool_calls" {
+		t.Fatalf("finish_reason = %v, want tool_calls: %s", finishReason, mustMarshal(finalChunk))
+	}
+}
+
+func TestConvertResponsesResponseToOpenAI_IncompleteUsesLength(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}]}`
+	body, err := convertResponsesResponseToOpenAI([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	finishReason := resp["choices"].([]any)[0].(map[string]any)["finish_reason"]
+	if finishReason != "length" {
+		t.Fatalf("finish_reason = %v, want length", finishReason)
+	}
+}
+
+func TestConvertResponsesResponseToOpenAI_IncompleteUsesContentFilter(t *testing.T) {
+	input := `{"id":"resp_123","object":"response","model":"gpt-4","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"filtered"}]}]}`
+	body, err := convertResponsesResponseToOpenAI([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	finishReason := resp["choices"].([]any)[0].(map[string]any)["finish_reason"]
+	if finishReason != "content_filter" {
+		t.Fatalf("finish_reason = %v, want content_filter", finishReason)
+	}
+}
+
+func TestConvertOpenAIStreamToResponses_ReasoningUsesReasoningEvents(t *testing.T) {
+	c := &Converter{From: FormatOpenAI, To: FormatResponses}
+	chunk := `{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"glm-4","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Let me think"},"finish_reason":null}]}`
+	result, err := convertOpenAIStreamToResponses(c, []byte(chunk))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !contains(result, "response.reasoning_text.delta") {
+		t.Fatalf("expected reasoning event, got: %s", string(result))
+	}
+	if contains(result, `"type":"response.output_text.delta"`) {
+		t.Fatalf("reasoning must not be emitted as output_text.delta: %s", string(result))
+	}
+}
+
+func TestConvertResponsesStreamToOpenAI_ReasoningPreserved(t *testing.T) {
+	event := `{"type":"response.reasoning_text.delta","delta":"reason step"}`
+	result, err := convertResponsesStreamToOpenAI(&Converter{}, []byte(event))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected reasoning chunk")
+	}
+	var chunk map[string]any
+	if err := json.Unmarshal(result, &chunk); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	delta := chunk["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
+	if delta["reasoning_content"] != "reason step" {
+		t.Fatalf("delta = %v, want reasoning_content", delta)
+	}
+}
+
+func TestConvertAnthropicStreamToResponses_ThinkingBecomesReasoning(t *testing.T) {
+	c := &Converter{From: FormatAnthropic, To: FormatResponses}
+	event := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ponder"}}`
+	result, err := convertAnthropicStreamToResponses(c, []byte(event))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil || !contains(result, "response.reasoning_text.delta") {
+		t.Fatalf("expected reasoning event, got: %s", string(result))
+	}
+}
+
+func TestDetectClientFormat_CountTokensIsNotMessages(t *testing.T) {
+	for _, path := range []string{"/v1/messages/count_tokens", "/v/messages/count_tokens", "/messages/count_tokens"} {
+		if got := DetectClientFormat(path); got != FormatUnknown {
+			t.Fatalf("DetectClientFormat(%q) = %q, want unknown", path, got)
+		}
+	}
+}
+
+func TestRewritePath_DoesNotRewriteCountTokens(t *testing.T) {
+	for _, format := range []Format{FormatOpenAI, FormatResponses, FormatAnthropic} {
+		got := RewritePath("/v1/messages/count_tokens", format)
+		if got != "/v1/messages/count_tokens" {
+			t.Fatalf("RewritePath count_tokens = %q, want unchanged", got)
+		}
 	}
 }
 
@@ -1592,8 +1845,8 @@ func TestConvertOpenAIStreamToResponses_ReasoningContent(t *testing.T) {
 	if !contains(result, "response.created") {
 		t.Errorf("chunk1: missing response.created: %s", string(result))
 	}
-	if !contains(result, "response.output_text.delta") {
-		t.Errorf("chunk1: missing output_text.delta for reasoning: %s", string(result))
+	if !contains(result, "response.reasoning_text.delta") {
+		t.Errorf("chunk1: missing reasoning_text.delta for reasoning: %s", string(result))
 	}
 	if !contains(result, "Let me think") {
 		t.Errorf("chunk1: missing reasoning content: %s", string(result))
@@ -1612,8 +1865,8 @@ func TestConvertOpenAIStreamToResponses_ReasoningContent(t *testing.T) {
 	if contains(result, "response.created") {
 		t.Errorf("chunk2: unexpected response.created (should not repeat): %s", string(result))
 	}
-	if !contains(result, "response.output_text.delta") {
-		t.Errorf("chunk2: missing output_text.delta: %s", string(result))
+	if !contains(result, "response.reasoning_text.delta") {
+		t.Errorf("chunk2: missing reasoning_text.delta: %s", string(result))
 	}
 	if !contains(result, " about this") {
 		t.Errorf("chunk2: missing reasoning content: %s", string(result))
@@ -2155,9 +2408,6 @@ func TestConvertAnthropicStreamToResponses_MultiLineIntermediateUsage(t *testing
 	result, err := convertAnthropicStreamToResponses(c, []byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if !contains(result, "response.content_part.done") {
-		t.Fatalf("missing response.content_part.done: %s", string(result))
 	}
 	if !contains(result, "response.completed") {
 		t.Fatalf("missing response.completed from usage line: %s", string(result))

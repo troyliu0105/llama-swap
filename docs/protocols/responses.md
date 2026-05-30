@@ -10,6 +10,36 @@ The newest OpenAI API endpoint, designed for agentic workflows. Unlike the Chat 
 | Path        | `/v1/responses`      |
 | Content-Type | `application/json`  |
 
+## Conversion Support in llama-swap
+
+When a peer model is configured with `upstreamFormat`, llama-swap can translate Responses traffic to and from OpenAI Chat Completions and Anthropic Messages.
+
+### Status
+
+| Conversion area | Status | Notes |
+|---|---|---|
+| Responses → Chat Completions request | Partial | Covers `input`, `instructions`, common controls, JSON/text output format mapping, function tools, and tool choice. Responses-native built-in tools are not converted into Chat Completions equivalents. |
+| Responses ← Chat Completions response | Partial | Covers assistant text, tool calls, usage, and incomplete/content-filter finish reasons. Rich Responses-native output variants are not fully reconstructed from Chat Completions. |
+| Responses ↔ Chat Completions streaming | Partial | Supports text, reasoning, function-call lifecycle, terminal status mapping, and usage chunks. Unknown or unsupported stream event families are dropped. |
+| Responses → Anthropic request | Partial | Implemented through the Chat Completions bridge. Core text/tool flows work, but Responses-only tool types and richer output features do not map cleanly. |
+| Responses ← Anthropic response | Partial | Implemented through the Chat Completions bridge. Covers text, tool use, usage, and stop reasons on the common paths. |
+| Responses ↔ Anthropic streaming | Partial | Supports text, reasoning/thinking, tool calls, stop reasons, and usage for the common stream shapes. Not every Responses semantic event has an Anthropic equivalent. |
+
+### Supported Well
+
+- String and message-array input for standard conversational use
+- Function tool definitions and tool-choice mapping
+- Assistant text output and function-call output items on the common paths
+- Streamed text, reasoning, and tool-call argument deltas
+- Usage conversion for supported response and stream shapes
+
+### Known Gaps
+
+- Responses-native built-in tools such as hosted web/file/code/MCP tools are not converted into other protocols.
+- Some Responses output item families have no equivalent in Chat Completions or Anthropic Messages and are therefore not preserved losslessly.
+- Multimodal and long-tail typed content support is incomplete across conversions.
+- Unknown semantic stream events are dropped during conversion instead of being forwarded as mixed-protocol payloads.
+
 ## Request Body
 
 ### Required Fields

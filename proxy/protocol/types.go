@@ -44,13 +44,22 @@ type Converter struct {
 	toolCallBuffers   map[int]*toolCallBuf
 	streamFinished    bool
 	pendingStopReason string // buffered stop reason, awaiting terminal emission
+
+	responseMessageDone        bool
+	responseCompleted          bool
+	responseAwaitingCompletion bool
+	responsePendingTerminal    string
+	responseSawToolCall        bool
+	responseToolIndexes        map[int]int
+	openAIIncludeUsage         bool
 }
 
 // toolCallBuf accumulates tool call data from OpenAI streaming chunks.
 type toolCallBuf struct {
-	id   string
-	name string
-	args strings.Builder
+	id          string
+	name        string
+	args        strings.Builder
+	outputIndex int
 }
 
 // Clone returns a shallow copy of the Converter with stream state reset.

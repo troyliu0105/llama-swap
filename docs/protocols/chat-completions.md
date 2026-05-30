@@ -13,6 +13,37 @@ Reference for the OpenAI `/v1/chat/completions` endpoint. Covers the full reques
 
 This is the primary chat endpoint. It accepts a list of messages and returns a model-generated response. Supports text, images, audio, tool calls, and structured output.
 
+## Conversion Support in llama-swap
+
+When a peer model is configured with `upstreamFormat`, llama-swap can convert Chat Completions traffic to and from the Responses and Anthropic Messages protocols.
+
+### Status
+
+| Conversion area | Status | Notes |
+|---|---|---|
+| Chat Completions → Responses request | Partial | Covers core chat fields, common sampling controls, JSON/text output format mapping, function tools, and tool choice. Hosted Responses-only tools are not synthesized from Chat Completions. |
+| Chat Completions ← Responses response | Partial | Covers assistant text, function calls, usage, and incomplete/content-filter finish reasons. Responses-only output item types are not fully preserved. |
+| Chat Completions ↔ Responses streaming | Partial | Supports text deltas, reasoning deltas, function-call lifecycle, finish reasons, and usage chunks. Unknown or protocol-specific events are dropped rather than tunneled through. |
+| Chat Completions → Anthropic request | Partial | Covers system/developer extraction, user/assistant/tool turns, function tools, tool choice, and common controls. Anthropic-native built-in tool families are not generated from Chat Completions input. |
+| Chat Completions ← Anthropic response | Partial | Covers text, tool use, usage, and stop-reason mapping. Anthropic-specific long-tail metadata is not fully preserved. |
+| Chat Completions ↔ Anthropic streaming | Partial | Supports text, reasoning/thinking, tool calls, stop reasons, and usage handling. Provider-specific extension events may be ignored. |
+
+### Supported Well
+
+- Standard text chat requests and responses
+- Function tools / tool calls
+- Streamed text deltas
+- Streamed reasoning/thinking deltas on the supported paths
+- Usage conversion for the supported response shapes
+- `content_filter`, `length`, and tool-call terminal state mapping on the converted paths
+
+### Known Gaps
+
+- Multimodal parity is incomplete across conversions. Some content block types still fail fast instead of degrading gracefully.
+- Chat Completions cannot express all Responses-native tool types or output item types.
+- Unknown stream event types are intentionally dropped during conversion to avoid emitting invalid mixed-protocol SSE frames.
+- Conversion support is focused on `/v1/chat/completions`, `/v1/responses`, and `/v1/messages`; it is not a general cross-protocol bridge for unrelated endpoints.
+
 ## Request Body
 
 ### Required Fields

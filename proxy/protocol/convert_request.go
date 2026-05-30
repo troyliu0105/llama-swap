@@ -646,7 +646,7 @@ func anthropicToOpenAIRequest(body []byte) ([]byte, error) {
 				return nil, fmt.Errorf("invalid anthropic tool at index %d", i)
 			}
 			toolType, _ := tool["type"].(string)
-			if toolType == "custom" {
+			if toolType == "" || toolType == "custom" {
 				openaiTools = append(openaiTools, map[string]any{
 					"type": "function",
 					"function": map[string]any{
@@ -897,7 +897,6 @@ func openAIToAnthropicRequest(body []byte) ([]byte, error) {
 					return nil, fmt.Errorf("tool %q has non-object function field in openai→anthropic conversion", toolType)
 				}
 				anthropicTools = append(anthropicTools, map[string]any{
-					"type":         "custom",
 					"name":         fn["name"],
 					"description":  fn["description"],
 					"input_schema": fn["parameters"],
@@ -1071,4 +1070,14 @@ func anthropicToolResultText(content any) string {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+func detectOpenAIStreamIncludeUsage(body []byte) bool {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false
+	}
+	streamOptions, _ := req["stream_options"].(map[string]any)
+	includeUsage, _ := streamOptions["include_usage"].(bool)
+	return includeUsage
 }
